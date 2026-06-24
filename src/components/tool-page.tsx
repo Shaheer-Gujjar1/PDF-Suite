@@ -1,13 +1,23 @@
 'use client'
 
 import * as React from 'react'
-import { motion } from 'framer-motion'
-import { ArrowLeft, Layers, Sparkles, Wand2, ChevronRight } from 'lucide-react'
-import { toast } from 'sonner'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  ArrowLeft,
+  Layers,
+  Sparkles,
+  Wand2,
+  ChevronRight,
+  Loader2,
+  Cpu,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { PrivacyBadge } from '@/components/privacy-badge'
 import { Dropzone, type QueuedFile } from '@/components/dropzone'
+import { ProcessingPanel } from '@/components/processing-panel'
+import { useProcessing } from '@/hooks/use-processing'
+import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
   type Tool,
   type ToolCategory,
@@ -51,7 +61,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const cfg = getInput(tool)
   const [files, setFiles] = React.useState<QueuedFile[]>([])
   const [html, setHtml] = React.useState('')
-  const ready = tool.step <= 1
+  const implemented = isImplemented(tool.id)
+  const preview = !implemented
+
+  const processing = useProcessing()
 
   const related = tools
     .filter((t) => t.category === tool.category && t.id !== tool.id)
@@ -59,15 +72,44 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
 
   const cat = categoryMeta(tool.category as ToolCategory)
 
-  const handleProcess = () => {
-    if (!ready) {
-      toast.info(`“${tool.name}” arrives in Step ${tool.step}`, {
-        description: 'The UI is ready — processing logic lands in the next step.',
-      })
-      return
+  const canProcess =
+    cfg.mode === 'files' ? files.length > 0 : html.trim().length > 0
+
+  const handleProcess = async () => {
+    if (!canProcess || processing.isWorking) return
+
+    const processor = getProcessor(tool.id)
+    let inputs: { fileName: string; data: ArrayBuffer; size: number }[] = []
+    let mode: 'per-file' | 'single' = 'per-file'
+    let singleLabel: string | undefined
+
+    if (cfg.mode === 'text') {
+      const data = new TextEncoder().encode(html).buffer as ArrayBuffer
+      inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
+      mode = 'single'
+      singleLabel = 'HTML → PDF output'
+    } else {
+      for (const qf of files) {
+        const data = await qf.file.arrayBuffer()
+        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+      }
+      // Merge groups all inputs into a single task (one output).
+      if (tool.id === 'merge') {
+        mode = 'single'
+        singleLabel = 'Merged document'
+      }
     }
-    toast.success('Processing…', { description: 'Wiring up in the next step.' })
+
+    await processing.run({ processor, mode, inputs, singleLabel })
   }
+
+  const buttonLabel = processing.isWorking
+    ? 'Processing…'
+    : implemented
+      ? `Run ${tool.name}`
+      : preview
+        ? 'Run engine preview'
+        : `Run ${tool.name}`
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8 lg:py-12">
@@ -121,7 +163,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           {tool.tag && (
             <Badge className="rounded-full">{tool.tag}</Badge>
           )}
-          {!ready && (
+          {preview && (
             <Badge variant="outline" className="rounded-full border-amber-500/40 text-amber-600 dark:text-amber-400">
               <Sparkles className="mr-1 h-3 w-3" /> Step {tool.step}
             </Badge>
@@ -156,7 +198,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             <textarea
               value={html}
               onChange={(e) => setHtml(e.target.value)}
-              placeholder="<h1>Hello PDF</h1>\n<p>Render this into a PDF…</p>"
+              placeholder={'<h1>Hello PDF</h1>\n<p>Render this into a PDF…</p>'}
               className="min-h-[220px] w-full resize-y rounded-xl border border-border bg-card p-4 font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
             />
             <p className="mt-2 text-xs text-muted-foreground">
@@ -168,41 +210,75 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         {/* Action bar */}
         <div className="mt-6 flex flex-col items-center justify-between gap-3 border-t border-border/60 pt-5 sm:flex-row">
           <p className="text-xs text-muted-foreground">
-            {cfg.mode === 'files'
-              ? files.length === 0
-                ? 'Add files to begin.'
-                : `${files.length} file${files.length > 1 ? 's' : ''} ready.`
-              : html.trim()
-                ? 'HTML ready.'
-                : 'Paste HTML to begin.'}
+            {processing.isWorking
+              ? 'Running locally — your browser is doing the work.'
+              : cfg.mode === 'files'
+                ? files.length === 0
+                  ? 'Add files to begin.'
+                  : `${files.length} file${files.length > 1 ? 's' : ''} ready.`
+                : html.trim()
+                  ? 'HTML ready.'
+                  : 'Paste HTML to begin.'}
           </p>
           <Button
             size="lg"
             className="w-full sm:w-auto"
-            disabled={cfg.mode === 'files' ? files.length === 0 : !html.trim()}
+            disabled={!canProcess || processing.isWorking}
             onClick={handleProcess}
           >
-            <Wand2 className="mr-2 h-4 w-4" />
-            {ready ? `Run ${tool.name}` : `Available in Step ${tool.step}`}
+            {processing.isWorking ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Wand2 className="mr-2 h-4 w-4" />
+            )}
+            {buttonLabel}
           </Button>
         </div>
 
-        {!ready && (
+        {preview && !processing.isWorking && processing.status === 'idle' && (
           <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
-            <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+            <Cpu className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
             <div>
               <p className="font-medium text-amber-700 dark:text-amber-300">
-                This tool is part of the Step {tool.step} rollout.
+                Engine preview · real {tool.name} logic arrives in Step {tool.step}.
               </p>
               <p className="mt-0.5 text-muted-foreground">
-                The upload interface is fully wired — the processing engine
-                lands in the next build step. Drop your files now to preview the
-                workflow.
+                The full pipeline is live — drop files and hit “Run engine
+                preview” to watch the Web Worker queue, live progress bars and
+                ZIP download in action. Files are processed locally and never
+                uploaded.
               </p>
             </div>
           </div>
         )}
       </motion.div>
+
+      {/* Processing panel */}
+      <AnimatePresence>
+        {processing.status !== 'idle' && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.3 }}
+            className="mt-6"
+          >
+            <ProcessingPanel
+              items={processing.items}
+              status={processing.status}
+              overallProgress={processing.overallProgress}
+              concurrency={processing.concurrency}
+              isWorking={processing.isWorking}
+              hasResults={processing.hasResults}
+              onCancel={processing.cancel}
+              onReset={processing.reset}
+              onDownloadOne={processing.downloadOne}
+              onDownloadAll={processing.downloadAll}
+              preview={preview}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Related tools */}
       {related.length > 0 && (
