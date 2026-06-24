@@ -5,6 +5,7 @@ import type {
   PoolCallbacks,
 } from './types'
 import { WORKER_SOURCE } from './worker-source'
+import { getLibSources } from './libs'
 
 interface QueuedItem {
   task: Task
@@ -21,25 +22,26 @@ interface ActiveItem {
 /**
  * A fixed-size pool of Web Workers with a FIFO task queue.
  *
- * - Workers are created lazily from a Blob URL (same-origin, so they load in
- *   any deployment including cross-origin previews) and reused for the pool's
- *   lifetime.
- * - Concurrency defaults to `min(hardwareConcurrency, 6)` so the UI stays
- *   responsive even on many-core machines.
- * - Input ArrayBuffers are transferred (zero-copy) to the worker; the main
- *   thread gives up access, which is fine because each file is read fresh.
- * - Per-task progress, results and errors are routed through callbacks so
- *   React state can update granularly.
+ * - Workers are created lazily from a single Blob URL (same-origin → works in
+ *   any deployment) whose source embeds the pdf-lib UMD bundle fetched once on
+ *   the main thread. This makes each worker self-contained: no runtime
+ *   importScripts, no cross-origin worker script loading.
+ * - Init is async (it fetches libs); the first `enqueue` awaits it. Subsequent
+ *   enqueues share the same init promise.
+ * - Concurrency defaults to `min(hardwareConcurrency, 6)`.
+ * - Input ArrayBuffers are transferred (zero-copy) to the worker.
+ * - Per-task progress, results and errors are routed through callbacks.
  */
 export class WorkerPool {
   private workers: Worker[] = []
-  private workerUrls: string[] = []
+  private workerUrl: string | null = null
   private idle = new Set<number>()
   private queue: QueuedItem[] = []
   private active = new Map<string, ActiveItem>()
   private callbacks: PoolCallbacks
   private size: number
   private terminated = false
+  private initPromise: Promise<void> | null = null
 
   constructor(callbacks: PoolCallbacks, size?: number) {
     this.callbacks = callbacks
@@ -59,17 +61,28 @@ export class WorkerPool {
     return this.active.size
   }
 
-  private ensureWorkers(): void {
-    if (this.workers.length || this.terminated) return
-    const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' })
+  /** Fetch libs + create workers. Idempotent. */
+  private init(): Promise<void> {
+    if (this.workers.length || this.terminated) return Promise.resolve()
+    if (!this.initPromise) {
+      this.initPromise = this.doInit()
+    }
+    return this.initPromise
+  }
+
+  private async doInit(): Promise<void> {
+    const libSource = await getLibSources()
+    if (this.terminated) return
+    const blob = new Blob([libSource + '\n' + WORKER_SOURCE], {
+      type: 'application/javascript',
+    })
+    this.workerUrl = URL.createObjectURL(blob)
     for (let i = 0; i < this.size; i++) {
-      const url = URL.createObjectURL(blob)
-      const worker = new Worker(url)
+      const worker = new Worker(this.workerUrl)
       const idx = i
       worker.onmessage = (e: MessageEvent<WorkerMessage>) =>
         this.handleMessage(e.data, idx)
       worker.onerror = (e: ErrorEvent) => {
-        // If a task is active on this worker, reject it; then recycle.
         const entry = [...this.active.entries()].find(
           ([, v]) => v.workerIdx === idx
         )
@@ -84,7 +97,6 @@ export class WorkerPool {
         this.drain()
       }
       this.workers.push(worker)
-      this.workerUrls.push(url)
       this.idle.add(idx)
     }
   }
@@ -119,8 +131,9 @@ export class WorkerPool {
     }
   }
 
-  enqueue(task: Task): Promise<ProcessOutput> {
-    this.ensureWorkers()
+  async enqueue(task: Task): Promise<ProcessOutput> {
+    await this.init()
+    if (this.terminated) throw new Error('Cancelled')
     return new Promise<ProcessOutput>((resolve, reject) => {
       this.queue.push({ task, resolve, reject })
       this.drain()
@@ -128,7 +141,14 @@ export class WorkerPool {
   }
 
   /** Enqueue many tasks and resolve when all settle (order preserved). */
-  enqueueAll(tasks: Task[]): Promise<PromiseSettledResult<ProcessOutput>[]> {
+  async enqueueAll(tasks: Task[]): Promise<PromiseSettledResult<ProcessOutput>[]> {
+    await this.init()
+    if (this.terminated) {
+      return tasks.map(() => ({
+        status: 'rejected' as const,
+        reason: new Error('Cancelled'),
+      }))
+    }
     return Promise.allSettled(tasks.map((t) => this.enqueue(t)))
   }
 
@@ -156,9 +176,9 @@ export class WorkerPool {
   terminate(): void {
     this.terminated = true
     for (const w of this.workers) w.terminate()
-    for (const url of this.workerUrls) URL.revokeObjectURL(url)
+    if (this.workerUrl) URL.revokeObjectURL(this.workerUrl)
     this.workers = []
-    this.workerUrls = []
+    this.workerUrl = null
     this.idle.clear()
     for (const [, item] of this.active)
       item.reject(new Error('Cancelled'))

@@ -16,6 +16,12 @@ import { Badge } from '@/components/ui/badge'
 import { PrivacyBadge } from '@/components/privacy-badge'
 import { Dropzone, type QueuedFile } from '@/components/dropzone'
 import { ProcessingPanel } from '@/components/processing-panel'
+import {
+  ToolOptions,
+  hasOptions,
+  defaultOptions,
+  type ToolOptionsMap,
+} from '@/components/tool-options'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -61,6 +67,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const cfg = getInput(tool)
   const [files, setFiles] = React.useState<QueuedFile[]>([])
   const [html, setHtml] = React.useState('')
+  const [options, setOptions] = React.useState<ToolOptionsMap>(() =>
+    defaultOptions(tool.id)
+  )
   const implemented = isImplemented(tool.id)
   const preview = !implemented
 
@@ -71,6 +80,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     .slice(0, 4)
 
   const cat = categoryMeta(tool.category as ToolCategory)
+
+  // Reset state when switching tools.
+  React.useEffect(() => {
+    setFiles([])
+    setHtml('')
+    setOptions(defaultOptions(tool.id))
+  }, [tool.id])
 
   const canProcess =
     cfg.mode === 'files' ? files.length > 0 : html.trim().length > 0
@@ -93,14 +109,16 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         const data = await qf.file.arrayBuffer()
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
       }
-      // Merge groups all inputs into a single task (one output).
       if (tool.id === 'merge') {
         mode = 'single'
         singleLabel = 'Merged document'
+      } else if (tool.id === 'images-to-pdf' && options.output === 'single') {
+        mode = 'single'
+        singleLabel = 'Combined image PDF'
       }
     }
 
-    await processing.run({ processor, mode, inputs, singleLabel })
+    await processing.run({ processor, mode, inputs, options, singleLabel })
   }
 
   const buttonLabel = processing.isWorking
@@ -204,6 +222,18 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             <p className="mt-2 text-xs text-muted-foreground">
               HTML rendering arrives in Step {tool.step}.
             </p>
+          </div>
+        )}
+
+        {/* Tool-specific options */}
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && (
+          <div className="mt-5">
+            <ToolOptions
+              tool={tool}
+              options={options}
+              onChange={setOptions}
+              disabled={processing.isWorking}
+            />
           </div>
         )}
 

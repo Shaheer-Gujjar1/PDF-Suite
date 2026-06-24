@@ -65,3 +65,32 @@ Stage Summary:
   - **Concurrency cap = min(hardwareConcurrency, 6)**.
   - Engine runs in **preview mode** for not-yet-built tools (passthrough) so the whole pipeline is demonstrable now; `registry.ts` flips tools to real processors in Steps 3-6.
 - Ready for Step 3: implement real processors (merge/split/rotate/images-to-pdf) in the worker via pdf-lib/jsPDF; just add processor functions + register in `toolProcessors` map.
+
+---
+Task ID: 3
+Agent: main (orchestrator)
+Task: Step 3 — Category A tools (Merge, Split, Rotate, Images to PDF) using pdf-lib with batch processing.
+
+Work Log:
+- Installed `pdf-lib` (runtime via CDN-embedded-in-blob; npm package documents the dep + gives types).
+- Built `src/lib/processing/libs.ts`: fetches pdf-lib UMD from jsDelivr once (cached), so it can be embedded into the worker Blob (self-contained worker, no runtime importScripts, works offline after first load).
+- Rewrote `src/lib/processing/worker-source.ts`: added 4 real pdf-lib processors — merge (copyPages), split (each-page + custom ranges via parseRanges), rotate (getRotation/setRotation + degrees), images-to-pdf (embedPng/embedJpg + OffscreenCanvas conversion for non-PNG/JPEG + fit/A4/Letter page sizing). Fixed critical bug: renamed accessor `PDFLib()` → `getPDFLib()` because the top-level function declaration `function PDFLib()` was shadowing `self.PDFLib` (pdf-lib's UMD assignment) in the worker global scope.
+- Updated `src/lib/processing/worker-pool.ts`: `init()` is now async — fetches lib source, prepends it to WORKER_SOURCE, creates one shared Blob URL, spawns workers. `enqueue`/`enqueueAll` await init. Single Blob URL shared across all workers (memory-efficient).
+- Updated `src/lib/processing/registry.ts`: registered merge/split/rotate/images-to-pdf → these tools now flip from "preview" to "implemented".
+- Updated `src/components/tool-card.tsx`: "Soon" badge now driven by `isImplemented(tool.id)` instead of `step <= 1`.
+- Built `src/components/tool-options.tsx`: per-tool options UI — SplitOptions (each-page / custom-ranges radio + ranges input), RotateOptions (90°/180°/270° radio), ImagesOptions (single/multiple radio + page-size select). Premium radio-card design with has-[:checked] styling.
+- Updated `src/components/tool-page.tsx`: options state via defaultOptions(tool.id), ToolOptions rendered when files present, reset on tool switch. handleProcess sets mode per tool (merge→single, images-to-pdf single-output→single, else per-file) and passes options through to run().
+- Generated valid test assets: 3 multi-page PDFs (pdf-lib, 3/2/4 pages) + 3 colored PNG images (sharp) in /tmp.
+
+Stage Summary:
+- Step 3 complete and browser-verified via Agent Browser (all outputs validated by reloading them through pdf-lib in Node):
+  - **Merge PDF**: 3 PDFs (3+2+4 pages) → merged.pdf verified at exactly 9 pages ✓
+  - **Split PDF (each page)**: 3-page PDF → 3 single-page PDFs (pdf-a-pages-1/2/3.pdf), each 1 page, zipped ✓
+  - **Split PDF (custom ranges)**: "1-2" range → 1 PDF containing pages 1-2 ✓
+  - **Rotate PDF (batch)**: 2 PDFs rotated 90° → both output, downloaded one verified at rotation=90° (original 0°) ✓
+  - **Images to PDF (single)**: 3 PNGs → 1 PDF with 3 pages, each 300×200 (fit mode) ✓
+  - **Images to PDF (multiple)**: 3 PNGs → 3 separate PDFs, each with its own Download button ✓
+  - Options UI renders per-tool (radios + ranges input + page-size select); Start-over reset works.
+  - 0 errors throughout; lint clean; dev log clean.
+- Key bug fixed: worker global-scope function-name collision with UMD library property (getPDFLib rename). Important lesson for Step 4 WASM libs.
+- Architecture ready for Step 4: add WASM libs to libs.ts fetch list + new processors in worker-source.ts + register in registry.ts. The async-init blob-embedding pattern handles WASM (fetch .wasm, embed or fetch at worker init).

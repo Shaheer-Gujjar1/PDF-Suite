@@ -3,6 +3,7 @@
 import { motion } from 'framer-motion'
 import { ArrowRight, Layers } from 'lucide-react'
 import { type Tool, accentClasses } from '@/lib/tools'
+import { isImplemented } from '@/lib/processing/registry'
 import { cn } from '@/lib/utils'
 
 interface ToolCardProps {
@@ -14,7 +15,7 @@ interface ToolCardProps {
 export function ToolCard({ tool, onOpen, index = 0 }: ToolCardProps) {
   const Icon = tool.icon
   const a = accentClasses[tool.accent]
-  const ready = tool.step <= 1
+  const ready = isImplemented(tool.id)
 
   return (
     <motion.button

@@ -1,86 +1,234 @@
 /**
  * Self-contained Web Worker source (classic worker, run from a Blob URL).
  *
- * Why a blob worker instead of `new Worker(new URL(...), {type:'module'})`?
- * Module workers enforce strict same-origin on the script URL, which breaks
- * in cross-origin preview/CDN deployments. A Blob-URL worker is same-origin
- * by construction, so it works everywhere. Heavy libraries (pdf-lib, jsPDF,
- * SheetJS, QPDF WASM…) are pulled in via `importScripts()` at the top as each
- * build step needs them — see the Step 3+ notes below.
+ * The main thread prepends the fetched pdf-lib UMD bundle to this string
+ * before creating the Blob, so `self.PDFLib` is available with no runtime
+ * importScripts. See `lib/processing/libs.ts`.
  *
- * The message protocol matches `lib/processing/types.ts`:
+ * Message protocol matches `lib/processing/types.ts`:
  *   in : { type: 'process', task: Task }
  *   out: { id, kind: 'progress'|'log'|'result'|'error', ... }
  */
 export const WORKER_SOURCE = /* js */ `
 "use strict";
 
-// --- Step 3+ library loaders (added as needed) -----------------------------
-// Example for when pdf-lib is required:
-//   importScripts('https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js');
-//   var PDFLib = self.PDFLib;
-// ---------------------------------------------------------------------------
+/* pdf-lib is prepended by the main thread; access via self.PDFLib. */
+function getPDFLib() {
+  if (!self.PDFLib) throw new Error('pdf-lib failed to load');
+  return self.PDFLib;
+}
 
 function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-
-function suffixName(name, suffix) {
-  var dot = name.lastIndexOf('.');
-  if (dot <= 0) return name + suffix;
-  return name.slice(0, dot) + suffix + name.slice(dot);
-}
 
 function guessMime(name) {
   var ext = (name.split('.').pop() || '').toLowerCase();
   var map = {
-    pdf: 'application/pdf',
-    png: 'image/png',
-    jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
-    webp: 'image/webp',
-    gif: 'image/gif',
-    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    zip: 'application/zip',
-    txt: 'text/plain',
-    html: 'text/html'
+    pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg',
+    jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', bmp: 'image/bmp',
+    zip: 'application/zip', txt: 'text/plain', html: 'text/html'
   };
   return map[ext] || 'application/octet-stream';
 }
 
+function stripExt(name) {
+  var dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** Convert a Uint8Array (possibly a subarray) into a clean ArrayBuffer. */
+function toArrayBuffer(bytes) {
+  if (bytes.buffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return bytes.buffer;
+  }
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+/** Parse "1-3, 5, 7-9" into 0-indexed page indices. */
+function parseRanges(text, pageCount) {
+  var groups = [];
+  var parts = String(text || '').split(',');
+  for (var i = 0; i < parts.length; i++) {
+    var raw = parts[i].trim();
+    if (!raw) continue;
+    var dash = raw.indexOf('-');
+    var start, end;
+    if (dash >= 0) {
+      start = parseInt(raw.slice(0, dash), 10);
+      end = parseInt(raw.slice(dash + 1), 10);
+    } else {
+      start = end = parseInt(raw, 10);
+    }
+    if (isNaN(start) || isNaN(end) || start < 1 || end < 1) continue;
+    if (start > end) { var t = start; start = end; end = t; }
+    var group = [];
+    for (var p = start; p <= end && p <= pageCount; p++) group.push(p - 1);
+    if (group.length) groups.push(group);
+  }
+  return groups;
+}
+
+/** Convert any image to PNG Uint8Array (via OffscreenCanvas) if not jpg/png. */
+async function toEmbeddable(data, mime) {
+  if (mime === 'image/jpeg') return { bytes: new Uint8Array(data), kind: 'jpg' };
+  if (mime === 'image/png') return { bytes: new Uint8Array(data), kind: 'png' };
+  var blob = new Blob([data], { type: mime || 'image/png' });
+  var bmp = await createImageBitmap(blob);
+  var canvas = new OffscreenCanvas(bmp.width, bmp.height);
+  var ctx = canvas.getContext('2d');
+  ctx.drawImage(bmp, 0, 0);
+  var pngBlob = await canvas.convertToBlob({ type: 'image/png' });
+  var arr = new Uint8Array(await pngBlob.arrayBuffer());
+  return { bytes: arr, kind: 'png' };
+}
+
+function fitInto(imgW, imgH, pageW, pageH) {
+  var scale = Math.min(pageW / imgW, pageH / imgH);
+  var w = imgW * scale, h = imgH * scale;
+  return { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h };
+}
+
+var PAGE_DIMS = { a4: [595.28, 841.89], letter: [612, 792] };
+
 var processors = {};
 
-/**
- * Engine preview processor (Step 2). Simulates staged work with streamed
- * progress and returns each input unchanged (renamed). Verifies the full
- * pipeline: queue, parallelism, progress, transferable buffers, ZIP output.
- */
+/* ---- Engine preview (Step 2) ------------------------------------------- */
 processors['passthrough'] = async function (inputs, _opts, onProgress, log) {
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
-    var inp = inputs[i];
-    log('Processing ' + inp.fileName);
-    var steps = 10;
-    for (var s = 0; s <= steps; s++) {
-      await delay(55);
-      onProgress((i + s / steps) / inputs.length);
-    }
-    out.push({
-      name: suffixName(inp.fileName, '-processed'),
-      data: inp.data,
-      mime: guessMime(inp.fileName)
-    });
+    log('Processing ' + inputs[i].fileName);
+    for (var s = 0; s <= 10; s++) { await delay(55); onProgress((i + s / 10) / inputs.length); }
+    out.push({ name: stripExt(inputs[i].fileName) + '-processed.' + (inputs[i].fileName.split('.').pop()||'pdf'), data: inputs[i].data, mime: guessMime(inputs[i].fileName) });
   }
   onProgress(1);
   return out;
+};
+
+/* ---- Merge PDF (multiple PDFs -> one) ---------------------------------- */
+processors['merge'] = async function (inputs, _opts, onProgress, log) {
+  var lib = getPDFLib();
+  var out = await lib.PDFDocument.create();
+  for (var i = 0; i < inputs.length; i++) {
+    log('Merging ' + inputs[i].fileName);
+    var src;
+    try { src = await lib.PDFDocument.load(inputs[i].data); }
+    catch (e) { throw new Error('Could not read ' + inputs[i].fileName + ': ' + e.message); }
+    var pages = await out.copyPages(src, src.getPageIndices());
+    for (var p = 0; p < pages.length; p++) out.addPage(pages[p]);
+    onProgress((i + 1) / inputs.length);
+  }
+  var bytes = await out.save();
+  onProgress(1);
+  return [{ name: 'merged.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf' }];
+};
+
+/* ---- Split PDF (one or more PDFs -> many) ------------------------------ */
+processors['split'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var mode = (opts && opts.mode) || 'each';
+  var rangesText = (opts && opts.ranges) || '';
+  var all = [];
+  for (var fi = 0; fi < inputs.length; fi++) {
+    log('Splitting ' + inputs[fi].fileName);
+    var src = await lib.PDFDocument.load(inputs[fi].data);
+    var total = src.getPageCount();
+    var groups;
+    if (mode === 'ranges') {
+      groups = parseRanges(rangesText, total);
+      if (!groups.length) groups = [src.getPageIndices()];
+    } else {
+      groups = [];
+      for (var g = 0; g < total; g++) groups.push([g]);
+    }
+    var base = stripExt(inputs[fi].fileName);
+    for (var gi = 0; gi < groups.length; gi++) {
+      var sub = await lib.PDFDocument.create();
+      var copied = await sub.copyPages(src, groups[gi]);
+      for (var c = 0; c < copied.length; c++) sub.addPage(copied[c]);
+      var b = await sub.save();
+      var first = groups[gi][0] + 1, last = groups[gi][groups[gi].length - 1] + 1;
+      var label = first === last ? String(first) : first + '-' + last;
+      all.push({ name: base + '-pages-' + label + '.pdf', data: toArrayBuffer(b), mime: 'application/pdf' });
+    }
+    onProgress((fi + 1) / inputs.length);
+  }
+  onProgress(1);
+  return all;
+};
+
+/* ---- Rotate PDF (batch) ------------------------------------------------ */
+processors['rotate'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var angle = ((opts && Number(opts.angle)) || 90) % 360;
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Rotating ' + inputs[i].fileName);
+    var doc = await lib.PDFDocument.load(inputs[i].data);
+    var pages = doc.getPages();
+    for (var p = 0; p < pages.length; p++) {
+      var cur = pages[p].getRotation().angle;
+      pages[p].setRotation(lib.degrees((cur + angle) % 360));
+    }
+    var bytes = await doc.save();
+    out.push({ name: stripExt(inputs[i].fileName) + '-rotated.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf' });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Images to PDF ----------------------------------------------------- */
+processors['images-to-pdf'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var output = (opts && opts.output) || 'single';
+  var pageSize = (opts && opts.pageSize) || 'fit';
+
+  async function buildPage(doc, conv) {
+    var img = conv.kind === 'png' ? await doc.embedPng(conv.bytes) : await doc.embedJpg(conv.bytes);
+    var page;
+    if (pageSize === 'fit') {
+      page = doc.addPage([img.width, img.height]);
+      page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+    } else {
+      var dims = PAGE_DIMS[pageSize] || PAGE_DIMS.a4;
+      page = doc.addPage(dims);
+      var f = fitInto(img.width, img.height, dims[0], dims[1]);
+      page.drawImage(img, { x: f.x, y: f.y, width: f.width, height: f.height });
+    }
+    return img;
+  }
+
+  if (output === 'single') {
+    var doc = await lib.PDFDocument.create();
+    for (var i = 0; i < inputs.length; i++) {
+      log('Adding ' + inputs[i].fileName);
+      var conv = await toEmbeddable(inputs[i].data, guessMime(inputs[i].fileName));
+      await buildPage(doc, conv);
+      onProgress((i + 1) / inputs.length);
+    }
+    var bytes = await doc.save();
+    onProgress(1);
+    return [{ name: 'images.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf' }];
+  } else {
+    var outs = [];
+    for (var j = 0; j < inputs.length; j++) {
+      log('Converting ' + inputs[j].fileName);
+      var doc2 = await lib.PDFDocument.create();
+      var conv2 = await toEmbeddable(inputs[j].data, guessMime(inputs[j].fileName));
+      await buildPage(doc2, conv2);
+      var b2 = await doc2.save();
+      outs.push({ name: stripExt(inputs[j].fileName) + '.pdf', data: toArrayBuffer(b2), mime: 'application/pdf' });
+      onProgress((j + 1) / inputs.length);
+    }
+    onProgress(1);
+    return outs;
+  }
 };
 
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;
   var id = task.id;
-  function send(msg, transfer) {
-    self.postMessage(msg, transfer || []);
-  }
+  function send(msg, transfer) { self.postMessage(msg, transfer || []); }
   try {
     var fn = processors[task.processor];
     if (!fn) throw new Error('Unknown processor: ' + task.processor);
@@ -92,7 +240,10 @@ self.onmessage = function (e) {
     Promise.resolve()
       .then(function () { return fn(inputs, task.options, onProgress, log); })
       .then(function (files) {
-        var transfer = files.map(function (f) { return f.data; });
+        var transfer = [];
+        for (var i = 0; i < files.length; i++) {
+          if (files[i].data instanceof ArrayBuffer) transfer.push(files[i].data);
+        }
         send({ id: id, kind: 'result', output: { id: id, files: files } }, transfer);
       })
       .catch(function (err) {
