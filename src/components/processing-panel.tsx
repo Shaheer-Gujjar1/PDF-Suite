@@ -234,11 +234,21 @@ export function ProcessingPanel({
                       </div>
                     )}
                     {item.status === 'done' && (
-                      <p className="mt-0.5 flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                        <FileCheck2 className="h-3 w-3" />
-                        {item.outputs.length} output
-                        {item.outputs.length > 1 ? 's' : ''} ready
-                      </p>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                        <p className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                          <FileCheck2 className="h-3 w-3" />
+                          {item.outputs.length} output
+                          {item.outputs.length > 1 ? 's' : ''} ready
+                        </p>
+                        {item.outputs[0]?.note && (
+                          <span className="text-muted-foreground">
+                            ·{' '}
+                            <span className="font-medium text-foreground">
+                              {item.outputs[0].note}
+                            </span>
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

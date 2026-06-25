@@ -224,6 +224,99 @@ processors['images-to-pdf'] = async function (inputs, opts, onProgress, log) {
   }
 };
 
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  var k = 1024, sizes = ['B', 'KB', 'MB', 'GB'];
+  var i = Math.floor(Math.log(n) / Math.log(k));
+  return parseFloat((n / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+/* ---- Compress PDF (lossless, stream + metadata) ------------------------ */
+processors['compress'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var stripMeta = !!(opts && opts.stripMetadata);
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var orig = inputs[i].data.byteLength;
+    log('Compressing ' + inputs[i].fileName + ' (' + fmtBytes(orig) + ')');
+    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    if (stripMeta) {
+      try {
+        doc.setTitle(''); doc.setAuthor(''); doc.setSubject('');
+        doc.setKeywords([]); doc.setCreator(''); doc.setProducer('PDF Suite');
+      } catch (_) {}
+    }
+    var bytes = await doc.save({ useObjectStreams: true, addDefaultPage: false });
+    var comp = bytes.byteLength;
+    var pct = orig > 0 ? Math.round((1 - comp / orig) * 100) : 0;
+    var note = fmtBytes(orig) + ' → ' + fmtBytes(comp) + (pct > 0 ? ' (' + pct + '% smaller)' : (pct < 0 ? ' (' + (-pct) + '% larger)' : ' (no change)'));
+    out.push({
+      name: stripExt(inputs[i].fileName) + '-compressed.pdf',
+      data: toArrayBuffer(bytes),
+      mime: 'application/pdf',
+      note: note
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Repair PDF (tolerant load + clean re-save) ------------------------- */
+processors['repair'] = async function (inputs, _opts, onProgress, log) {
+  var lib = getPDFLib();
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Repairing ' + inputs[i].fileName);
+    var doc;
+    try {
+      doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true, throwOnInvalidObject: false });
+    } catch (e) {
+      throw new Error('Could not repair ' + inputs[i].fileName + ': ' + (e && e.message ? e.message : String(e)));
+    }
+    var bytes = await doc.save({ useObjectStreams: true });
+    out.push({
+      name: stripExt(inputs[i].fileName) + '-repaired.pdf',
+      data: toArrayBuffer(bytes),
+      mime: 'application/pdf',
+      note: doc.getPageCount() + ' pages recovered'
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Unlock PDF (remove owner-password restrictions) ------------------- */
+processors['unlock'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var password = (opts && typeof opts.password === 'string') ? opts.password : '';
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Unlocking ' + inputs[i].fileName);
+    var doc;
+    try {
+      var loadOpts = { ignoreEncryption: true };
+      if (password) loadOpts.password = password;
+      doc = await lib.PDFDocument.load(inputs[i].data, loadOpts);
+    } catch (e) {
+      var msg = (e && e.message ? e.message : String(e));
+      throw new Error('Could not unlock ' + inputs[i].fileName + '. If it requires a password to open, pdf-lib cannot decrypt encrypted content. ' + msg);
+    }
+    // Re-save without any encryption → restrictions removed.
+    var bytes = await doc.save({ useObjectStreams: true });
+    out.push({
+      name: stripExt(inputs[i].fileName) + '-unlocked.pdf',
+      data: toArrayBuffer(bytes),
+      mime: 'application/pdf',
+      note: 'Restrictions removed'
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

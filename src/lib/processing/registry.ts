@@ -11,6 +11,9 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   split: 'split',
   rotate: 'rotate',
   'images-to-pdf': 'images-to-pdf',
+  compress: 'compress',
+  repair: 'repair',
+  unlock: 'unlock',
 }
 
 export function getProcessor(toolId: string): ProcessorType {

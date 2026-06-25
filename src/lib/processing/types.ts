@@ -20,6 +20,10 @@ export type ProcessorType =
   | 'watermark'
   | 'protect'
   | 'html-to-pdf'
+  // Step 4 — Category B (structural)
+  | 'compress'
+  | 'repair'
+  | 'unlock'
 
 export interface ProcessInput {
   id: string
@@ -32,6 +36,8 @@ export interface OutputFile {
   name: string
   data: ArrayBuffer
   mime: string
+  /** Optional human-readable note (e.g. "72% smaller"). */
+  note?: string
 }
 
 export interface Task {

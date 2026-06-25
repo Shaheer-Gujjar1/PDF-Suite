@@ -1,11 +1,12 @@
 'use client'
 
 import * as React from 'react'
-import { Scissors, RotateCw, Images } from 'lucide-react'
+import { Scissors, RotateCw, Images, FileArchive, LockOpen } from 'lucide-react'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Checkbox } from '@/components/ui/checkbox'
 import { type Tool } from '@/lib/tools'
 import { cn } from '@/lib/utils'
 
@@ -19,7 +20,7 @@ interface ToolOptionsProps {
 }
 
 export function hasOptions(toolId: string): boolean {
-  return ['split', 'rotate', 'images-to-pdf'].includes(toolId)
+  return ['split', 'rotate', 'images-to-pdf', 'compress', 'unlock'].includes(toolId)
 }
 
 export function defaultOptions(toolId: string): ToolOptionsMap {
@@ -30,6 +31,10 @@ export function defaultOptions(toolId: string): ToolOptionsMap {
       return { angle: 90 }
     case 'images-to-pdf':
       return { output: 'single', pageSize: 'fit' }
+    case 'compress':
+      return { stripMetadata: false }
+    case 'unlock':
+      return { password: '' }
     default:
       return {}
   }
@@ -62,6 +67,12 @@ export function ToolOptions({ tool, options, onChange, disabled }: ToolOptionsPr
       {tool.id === 'images-to-pdf' && (
         <ImagesOptions options={options} set={set} />
       )}
+      {tool.id === 'compress' && (
+        <CompressOptions options={options} set={set} />
+      )}
+      {tool.id === 'unlock' && (
+        <UnlockOptions options={options} set={set} />
+      )}
     </div>
   )
 }
@@ -69,6 +80,8 @@ export function ToolOptions({ tool, options, onChange, disabled }: ToolOptionsPr
 function SettingsIcon({ toolId }: { toolId: string }) {
   if (toolId === 'split') return <Scissors className="h-4 w-4" />
   if (toolId === 'rotate') return <RotateCw className="h-4 w-4" />
+  if (toolId === 'compress') return <FileArchive className="h-4 w-4" />
+  if (toolId === 'unlock') return <LockOpen className="h-4 w-4" />
   return <Images className="h-4 w-4" />
 }
 
@@ -198,5 +211,79 @@ function RadioCard({
         <span className="text-xs text-muted-foreground">{desc}</span>
       </span>
     </Label>
+  )
+}
+
+function CompressOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const strip = !!options.stripMetadata
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-3 rounded-xl border border-border bg-card p-3.5">
+        <Checkbox
+          id="strip-meta"
+          checked={strip}
+          onCheckedChange={(v) => set('stripMetadata', v === true)}
+          className="mt-0.5"
+        />
+        <div className="space-y-0.5">
+          <Label htmlFor="strip-meta" className="cursor-pointer text-sm font-medium">
+            Strip metadata
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            Remove title, author, keywords and other document properties for a
+            smaller, more private file. Text stays fully selectable.
+          </p>
+        </div>
+      </div>
+      <div className="flex items-start gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 text-xs text-muted-foreground">
+        <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+        <span>
+          Lossless compression — rewrites object streams and removes structural
+          bloat while keeping all text, images and vectors intact. Best results
+          on PDFs saved without compression or with verbose structure.
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function UnlockOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const password = (options.password as string) || ''
+  return (
+    <div className="space-y-4">
+      <OptionRow
+        label="Password"
+        hint="Only needed if the PDF needs a password to open."
+      >
+        <Input
+          type="password"
+          value={password}
+          onChange={(e) => set('password', e.target.value)}
+          placeholder="Leave empty for permission-only protection"
+          autoComplete="off"
+        />
+      </OptionRow>
+      <div className="flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 text-xs text-muted-foreground">
+        <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
+        <span>
+          Removes owner-password restrictions (printing, copying, editing).
+          PDFs that open without a password are unlocked instantly. For PDFs
+          that require a password to open, enter it above — if it can't be
+          decrypted in-browser, you'll get a clear error.
+        </span>
+      </div>
+    </div>
   )
 }

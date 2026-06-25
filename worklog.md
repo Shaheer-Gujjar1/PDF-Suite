@@ -94,3 +94,31 @@ Stage Summary:
   - 0 errors throughout; lint clean; dev log clean.
 - Key bug fixed: worker global-scope function-name collision with UMD library property (getPDFLib rename). Important lesson for Step 4 WASM libs.
 - Architecture ready for Step 4: add WASM libs to libs.ts fetch list + new processors in worker-source.ts + register in registry.ts. The async-init blob-embedding pattern handles WASM (fetch .wasm, embed or fetch at worker init).
+
+---
+Task ID: 4
+Agent: main (orchestrator)
+Task: Step 4 — Category B tools: Compress PDF, Repair PDF, Unlock PDF.
+
+Work Log:
+- Extended `src/lib/processing/types.ts`: added 'compress' | 'repair' | 'unlock' to ProcessorType; added optional `note?: string` field to OutputFile (for displaying compression ratios / recovery info in the UI).
+- Added 3 processors to `src/lib/processing/worker-source.ts`:
+  - **compress**: loads with ignoreEncryption, optional metadata strip (title/author/subject/keywords/creator/producer), re-saves with useObjectStreams:true (lossless stream compression). Computes original→compressed size + percentage and attaches as `note`. Preserves text selectability (no rasterization).
+  - **repair**: loads with ignoreEncryption + throwOnInvalidObject:false (tolerant parse that recovers objects even with damaged xref/structure), re-saves clean. Attaches "N pages recovered" note. Throws clear error if unrecoverable.
+  - **unlock**: loads with ignoreEncryption (+ optional password), re-saves without any encryption → removes owner-password restrictions. Attaches "Restrictions removed" note. Honest error message if pdf-lib can't decrypt user-password-encrypted content.
+- Registered all 3 in `src/lib/processing/registry.ts`.
+- Extended `src/components/tool-options.tsx`: added CompressOptions (strip-metadata checkbox + lossless info callout) and UnlockOptions (password input + honest limitations callout). Updated hasOptions/defaultOptions/SettingsIcon.
+- Updated `src/components/processing-panel.tsx`: done-state now displays the output `note` prominently (e.g. "12.9 KB → 7.2 KB (44% smaller)") alongside the "N outputs ready" text.
+- Generated test assets: large.pdf (8-page, uncompressed, 13.2KB), protected-owner.pdf (owner-password protected, opens without password), corrupted.pdf (xref table damaged).
+
+Stage Summary:
+- Step 4 complete and browser-verified via Agent Browser (all outputs validated by reloading through pdf-lib in Node):
+  - **Compress PDF (single)**: large.pdf 13194 → 7389 bytes, "12.9 KB → 7.2 KB (44% smaller)" shown in UI ✓ downloaded file = 7389 bytes, 8 pages intact ✓
+  - **Compress PDF (batch)**: 2 PDFs in parallel (4× parallel badge), each with its own ratio note ✓
+  - **Repair PDF**: corrupted.pdf (damaged xref) → "3 pages recovered", downloaded file reloads cleanly with 3 pages ✓
+  - **Unlock PDF**: protected-owner.pdf → "Restrictions removed", downloaded file has NO /Encrypt dict, reloads cleanly ✓
+  - Options UI renders for compress (strip-metadata checkbox + lossless callout) and unlock (password field + limitations callout); repair has no options (just runs).
+  - Compression ratio / recovery notes display prominently in the processing panel.
+  - 0 errors throughout; lint clean; dev log clean.
+- Design decision: used pdf-lib (already embedded in the worker blob from Step 3) for all three tools rather than pulling in a separate QPDF/MuPDF WASM build. Rationale: these are structural operations (stream compression, tolerant parsing, encryption removal) that pdf-lib's pure-JS engine handles capably — WASM would add significant bundle size without functional benefit here. The compress note shows real ratios; repair recovers genuinely broken xrefs; unlock genuinely removes owner-password restrictions. The architecture fully supports adding a WASM lib later if deep image recompression is needed.
+- Total implemented tools now: 7 of 20 (Merge, Split, Rotate, Images→PDF, Compress, Repair, Unlock).
