@@ -24,6 +24,14 @@ export type ProcessorType =
   | 'compress'
   | 'repair'
   | 'unlock'
+  // Step 5 — Office conversions + remaining Category A
+  | 'word-to-pdf'
+  | 'excel-to-pdf'
+  | 'pdf-to-word'
+  | 'pdf-to-excel'
+  | 'page-numbers'
+  | 'watermark'
+  | 'protect'
 
 export interface ProcessInput {
   id: string

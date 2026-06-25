@@ -5,7 +5,7 @@ import type {
   PoolCallbacks,
 } from './types'
 import { WORKER_SOURCE } from './worker-source'
-import { getLibSources } from './libs'
+import { getLibSources, WORKER_IMPORT_URLS } from './libs'
 
 interface QueuedItem {
   task: Task
@@ -73,7 +73,13 @@ export class WorkerPool {
   private async doInit(): Promise<void> {
     const libSource = await getLibSources()
     if (this.terminated) return
-    const blob = new Blob([libSource + '\n' + WORKER_SOURCE], {
+    // Inject the import-URLs map so the worker can lazily load office libs.
+    const importUrlsJson = JSON.stringify(WORKER_IMPORT_URLS)
+    const workerCode = libSource + '\n' + WORKER_SOURCE.replace(
+      '__IMPORT_URLS_PLACEHOLDER__',
+      importUrlsJson
+    )
+    const blob = new Blob([workerCode], {
       type: 'application/javascript',
     })
     this.workerUrl = URL.createObjectURL(blob)

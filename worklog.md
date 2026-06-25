@@ -122,3 +122,49 @@ Stage Summary:
   - 0 errors throughout; lint clean; dev log clean.
 - Design decision: used pdf-lib (already embedded in the worker blob from Step 3) for all three tools rather than pulling in a separate QPDF/MuPDF WASM build. Rationale: these are structural operations (stream compression, tolerant parsing, encryption removal) that pdf-lib's pure-JS engine handles capably — WASM would add significant bundle size without functional benefit here. The compress note shows real ratios; repair recovers genuinely broken xrefs; unlock genuinely removes owner-password restrictions. The architecture fully supports adding a WASM lib later if deep image recompression is needed.
 - Total implemented tools now: 7 of 20 (Merge, Split, Rotate, Images→PDF, Compress, Repair, Unlock).
+
+---
+Task ID: 5
+Agent: main (orchestrator)
+Task: Step 5 — Office conversions (Word↔PDF, Excel↔PDF) + remaining Category A (Page Numbers, Watermark, Protect, PDF to Images, HTML to PDF).
+
+Work Log:
+- Added mammoth, xlsx, docx, pdfjs (and pdfjsWorker) UMD URLs to `src/lib/processing/libs.ts`. Key architectural change: pdf-lib stays EMBEDDED in the blob (small, always needed); mammoth/xlsx/docx/pdfjs are loaded LAZILY via importScripts when a tool needs them (embedding large minified UMDs caused regex-parse corruption at library boundaries).
+- Added 9 processor types to `src/lib/processing/types.ts` + `OutputFile.note` already existed from Step 4.
+- Implemented 9 processors in `src/lib/processing/worker-source.ts`:
+  - **page-numbers**: drawText with position (6 options), format ({n}/{total}), start number, font size slider.
+  - **watermark**: diagonal text with opacity, font size, rotation.
+  - **protect**: pdf-lib encryption (user+owner password, restricted permissions). Button disabled until password entered.
+  - **pdf-to-images**: pdf.js + OffscreenCanvas rasterization → PNG/JPG per page. REQUIRED document polyfill (pdf.js fake-worker checks for `document` even in a worker) + blob-URL workerSrc.
+  - **html-to-pdf**: custom HTML tokenizer (h1-3, p, br, li, strong/b) → pdf-lib text layout with word wrap + pagination.
+  - **word-to-pdf**: mammoth.convertToHtml → reuses html-to-pdf renderer.
+  - **excel-to-pdf**: SheetJS sheet_to_json → pdf-lib grid (A4 landscape, cell borders, bold headers, column pagination).
+  - **pdf-to-word**: pdf.js getTextContent → line grouping by Y-position → docx Document with Paragraphs + PageBreaks.
+  - **pdf-to-excel**: pdf.js text extraction → column detection (split on 2+ spaces/tabs) → XLSX with one sheet per page.
+- Added `extractTextPages()` helper using pdf.js for real text extraction (grouped into lines by Y-coordinate, sorted by X).
+- Extended `src/components/tool-options.tsx`: PageNumberOptions (position select, format input, start number, font-size slider), WatermarkOptions (text, font-size slider, opacity slider), ProtectOptions (password input + dynamic callout), PdfToImagesOptions (PNG/JPG radio, resolution slider).
+- Updated `src/components/tool-page.tsx`: runEnabled logic (protect requires password before enabling).
+- Fixed 3 critical bugs in worker source:
+  1. **Template-literal regex escaping**: `/<script[\s\S]*?<\/script>/gi` in a template literal — `\/` becomes `/`, breaking the regex. Fixed with `\\s`, `\\S`, `\\/` to produce literal `\s`, `\S`, `\/` in output.
+  2. **Template-literal newline escaping**: `'\n'` in a template literal becomes a real newline, breaking the string. Fixed with `'\\n'`.
+  3. **Backtick in comment**: a comment containing `document` in backticks prematurely closed the template literal. Removed backticks.
+  4. **toArrayBuffer for ArrayBuffer input**: XLSX.write returns ArrayBuffer directly (not Uint8Array); `bytes.buffer` is undefined for ArrayBuffer. Added `if (bytes instanceof ArrayBuffer) return bytes` guard.
+- Generated test assets: test.docx (8.7KB, headings+paragraphs), test.xlsx (16.9KB, 6×6 sales data), test-multi.pdf (3 pages).
+
+Stage Summary:
+- Step 5 complete and browser-verified via Agent Browser (outputs validated):
+  - **Word to PDF**: test.docx → test.pdf (1 page, valid) ✓
+  - **Excel to PDF**: test.xlsx → test.pdf (1 page, "1 sheet(s)") ✓
+  - **PDF to Images**: 3-page PDF → 3 PNGs in ZIP (test-multi-page-1/2/3.png, ~18KB each) ✓
+  - **PDF to Word**: 3-page PDF → test-multi.docx (valid Word 2007+, "3 pages, 3 lines") ✓
+  - **PDF to Excel**: 3-page PDF → test-multi.xlsx (valid Excel 2007+, "3 sheet(s)") ✓
+  - **Page Numbers**: 3-page PDF → "3 pages numbered" ✓
+  - **Watermark**: → "Watermark added" ✓
+  - **Protect PDF**: password required to enable button → "Password protected" ✓
+  - **HTML to PDF**: pasted HTML → "1 page(s)" ✓
+  - 0 errors throughout; lint clean; dev log clean.
+- Key architectural learnings:
+  - Lazy importScripts (not embedding) for large office libs avoids regex corruption.
+  - pdf.js needs document polyfill + blob-URL workerSrc to run inside a Web Worker.
+  - Template literals require double-escaping for regex/newlines that must survive into the generated worker source.
+- Total implemented tools: 16 of 20. Remaining 4 (Organize, Crop, Sign & Annotate, Edit PDF Text) are Step 6.

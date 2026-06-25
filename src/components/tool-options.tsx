@@ -1,12 +1,13 @@
 'use client'
 
 import * as React from 'react'
-import { Scissors, RotateCw, Images, FileArchive, LockOpen } from 'lucide-react'
+import { Scissors, RotateCw, Images, FileArchive, LockOpen, Hash, Stamp, Lock, FileImage, Code2 } from 'lucide-react'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Slider } from '@/components/ui/slider'
 import { type Tool } from '@/lib/tools'
 import { cn } from '@/lib/utils'
 
@@ -20,7 +21,10 @@ interface ToolOptionsProps {
 }
 
 export function hasOptions(toolId: string): boolean {
-  return ['split', 'rotate', 'images-to-pdf', 'compress', 'unlock'].includes(toolId)
+  return [
+    'split', 'rotate', 'images-to-pdf', 'compress', 'unlock',
+    'page-numbers', 'watermark', 'protect', 'pdf-to-images',
+  ].includes(toolId)
 }
 
 export function defaultOptions(toolId: string): ToolOptionsMap {
@@ -35,6 +39,14 @@ export function defaultOptions(toolId: string): ToolOptionsMap {
       return { stripMetadata: false }
     case 'unlock':
       return { password: '' }
+    case 'page-numbers':
+      return { position: 'bottom-center', fontSize: 11, format: '{n}', startNumber: 1 }
+    case 'watermark':
+      return { text: 'CONFIDENTIAL', fontSize: 50, opacity: 15 }
+    case 'protect':
+      return { password: '' }
+    case 'pdf-to-images':
+      return { format: 'png', scale: 2 }
     default:
       return {}
   }
@@ -73,6 +85,18 @@ export function ToolOptions({ tool, options, onChange, disabled }: ToolOptionsPr
       {tool.id === 'unlock' && (
         <UnlockOptions options={options} set={set} />
       )}
+      {tool.id === 'page-numbers' && (
+        <PageNumberOptions options={options} set={set} />
+      )}
+      {tool.id === 'watermark' && (
+        <WatermarkOptions options={options} set={set} />
+      )}
+      {tool.id === 'protect' && (
+        <ProtectOptions options={options} set={set} />
+      )}
+      {tool.id === 'pdf-to-images' && (
+        <PdfToImagesOptions options={options} set={set} />
+      )}
     </div>
   )
 }
@@ -82,6 +106,10 @@ function SettingsIcon({ toolId }: { toolId: string }) {
   if (toolId === 'rotate') return <RotateCw className="h-4 w-4" />
   if (toolId === 'compress') return <FileArchive className="h-4 w-4" />
   if (toolId === 'unlock') return <LockOpen className="h-4 w-4" />
+  if (toolId === 'page-numbers') return <Hash className="h-4 w-4" />
+  if (toolId === 'watermark') return <Stamp className="h-4 w-4" />
+  if (toolId === 'protect') return <Lock className="h-4 w-4" />
+  if (toolId === 'pdf-to-images') return <FileImage className="h-4 w-4" />
   return <Images className="h-4 w-4" />
 }
 
@@ -284,6 +312,182 @@ function UnlockOptions({
           decrypted in-browser, you'll get a clear error.
         </span>
       </div>
+    </div>
+  )
+}
+
+function PageNumberOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const position = (options.position as string) || 'bottom-center'
+  const fontSize = Number(options.fontSize ?? 11)
+  const format = (options.format as string) || '{n}'
+  const startNumber = Number(options.startNumber ?? 1)
+  return (
+    <div className="space-y-4">
+      <OptionRow label="Position" hint="Where the number appears on each page.">
+        <Select value={position} onValueChange={(v) => set('position', v)}>
+          <SelectTrigger className="w-full sm:w-[220px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="bottom-center">Bottom center</SelectItem>
+            <SelectItem value="bottom-right">Bottom right</SelectItem>
+            <SelectItem value="bottom-left">Bottom left</SelectItem>
+            <SelectItem value="top-center">Top center</SelectItem>
+            <SelectItem value="top-right">Top right</SelectItem>
+            <SelectItem value="top-left">Top left</SelectItem>
+          </SelectContent>
+        </Select>
+      </OptionRow>
+      <OptionRow label="Format" hint="Use {n} for the page number, {total} for total.">
+        <Input
+          value={format}
+          onChange={(e) => set('format', e.target.value)}
+          placeholder="{n} / {total}"
+          className="font-mono"
+        />
+      </OptionRow>
+      <OptionRow label="Start at" hint="First page number value.">
+        <Input
+          type="number"
+          min={1}
+          value={startNumber}
+          onChange={(e) => set('startNumber', Number(e.target.value) || 1)}
+          className="w-full sm:w-[120px]"
+        />
+      </OptionRow>
+      <OptionRow label={`Font size · ${fontSize}pt`} hint="Number text size.">
+        <Slider
+          value={[fontSize]}
+          min={7}
+          max={24}
+          step={1}
+          onValueChange={(v) => set('fontSize', v[0])}
+          className="w-full sm:w-[220px]"
+        />
+      </OptionRow>
+    </div>
+  )
+}
+
+function WatermarkOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const text = (options.text as string) || 'CONFIDENTIAL'
+  const fontSize = Number(options.fontSize ?? 50)
+  const opacity = Number(options.opacity ?? 15)
+  return (
+    <div className="space-y-4">
+      <OptionRow label="Watermark text" hint="Diagonal text stamped across every page.">
+        <Input
+          value={text}
+          onChange={(e) => set('text', e.target.value)}
+          placeholder="CONFIDENTIAL"
+        />
+      </OptionRow>
+      <OptionRow label={`Font size · ${fontSize}pt`} hint="Larger = more prominent.">
+        <Slider
+          value={[fontSize]}
+          min={20}
+          max={120}
+          step={5}
+          onValueChange={(v) => set('fontSize', v[0])}
+          className="w-full sm:w-[220px]"
+        />
+      </OptionRow>
+      <OptionRow label={`Opacity · ${opacity}%`} hint="Transparency of the watermark.">
+        <Slider
+          value={[opacity]}
+          min={5}
+          max={80}
+          step={5}
+          onValueChange={(v) => set('opacity', v[0])}
+          className="w-full sm:w-[220px]"
+        />
+      </OptionRow>
+    </div>
+  )
+}
+
+function ProtectOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const password = (options.password as string) || ''
+  const hasPwd = password.length > 0
+  return (
+    <div className="space-y-4">
+      <OptionRow label="Password" hint="Required to open the protected PDF.">
+        <Input
+          type="password"
+          value={password}
+          onChange={(e) => set('password', e.target.value)}
+          placeholder="Enter a password"
+          autoComplete="new-password"
+        />
+      </OptionRow>
+      <div
+        className={cn(
+          'flex items-start gap-3 rounded-xl border p-3.5 text-xs',
+          hasPwd
+            ? 'border-emerald-500/30 bg-emerald-500/5 text-muted-foreground'
+            : 'border-amber-500/30 bg-amber-500/5 text-muted-foreground'
+        )}
+      >
+        <Lock className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', hasPwd ? 'text-emerald-500' : 'text-amber-500')} />
+        <span>
+          {hasPwd
+            ? 'Ready — the PDF will be encrypted with your password. Printing is allowed; editing, copying and annotation are restricted.'
+            : 'Enter a password above to enable protection. The password is required to open the resulting PDF.'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function PdfToImagesOptions({
+  options,
+  set,
+}: {
+  options: ToolOptionsMap
+  set: (key: string, value: unknown) => void
+}) {
+  const format = (options.format as string) || 'png'
+  const scale = Number(options.scale ?? 2)
+  return (
+    <div className="space-y-4">
+      <OptionRow label="Image format" hint="PNG is lossless; JPG is smaller.">
+        <RadioGroup
+          value={format}
+          onValueChange={(v) => set('format', v)}
+          className="grid grid-cols-2 gap-2"
+        >
+          <RadioCard value="png" label="PNG" desc="Lossless quality" />
+          <RadioCard value="jpg" label="JPG" desc="Smaller files" />
+        </RadioGroup>
+      </OptionRow>
+      <OptionRow label={`Resolution · ${scale}×`} hint="Higher = sharper but larger.">
+        <Slider
+          value={[scale]}
+          min={1}
+          max={4}
+          step={1}
+          onValueChange={(v) => set('scale', v[0])}
+          className="w-full sm:w-[220px]"
+        />
+      </OptionRow>
     </div>
   )
 }

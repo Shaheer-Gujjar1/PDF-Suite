@@ -12,7 +12,19 @@ const LIB_URLS: { id: string; url: string }[] = [
     id: 'pdf-lib',
     url: 'https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js',
   },
+  // mammoth, xlsx, docx are loaded lazily via importScripts inside the worker
+  // (embedding large minified UMD bundles in the Blob can corrupt regex
+  // parsing at the boundary between libraries).
 ]
+
+/** URLs for libraries loaded via importScripts inside the worker (lazy). */
+export const WORKER_IMPORT_URLS: Record<string, string> = {
+  mammoth: 'https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js',
+  xlsx: 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+  docx: 'https://cdn.jsdelivr.net/npm/docx@9.0.3/build/index.umd.js',
+  pdfjs: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js',
+  pdfjsWorker: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js',
+}
 
 let cache: string | null = null
 let inflight: Promise<string> | null = null

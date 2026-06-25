@@ -89,7 +89,14 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   }, [tool.id])
 
   const canProcess =
-    cfg.mode === 'files' ? files.length > 0 : html.trim().length > 0
+    cfg.mode === 'files'
+      ? files.length > 0
+      : html.trim().length > 0
+
+  // Protect requires a password before the run button is enabled.
+  const needsPassword = tool.id === 'protect'
+  const hasPassword = String(options.password ?? '').length > 0
+  const runEnabled = canProcess && (!needsPassword || hasPassword) && !processing.isWorking
 
   const handleProcess = async () => {
     if (!canProcess || processing.isWorking) return
@@ -253,7 +260,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           <Button
             size="lg"
             className="w-full sm:w-auto"
-            disabled={!canProcess || processing.isWorking}
+            disabled={!runEnabled}
             onClick={handleProcess}
           >
             {processing.isWorking ? (

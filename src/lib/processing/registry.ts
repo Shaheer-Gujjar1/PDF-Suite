@@ -14,6 +14,15 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   compress: 'compress',
   repair: 'repair',
   unlock: 'unlock',
+  'word-to-pdf': 'word-to-pdf',
+  'excel-to-pdf': 'excel-to-pdf',
+  'pdf-to-word': 'pdf-to-word',
+  'pdf-to-excel': 'pdf-to-excel',
+  'page-numbers': 'page-numbers',
+  watermark: 'watermark',
+  protect: 'protect',
+  'pdf-to-images': 'pdf-to-images',
+  'html-to-pdf': 'html-to-pdf',
 }
 
 export function getProcessor(toolId: string): ProcessorType {
