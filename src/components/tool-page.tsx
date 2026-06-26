@@ -22,6 +22,11 @@ import {
   defaultOptions,
   type ToolOptionsMap,
 } from '@/components/tool-options'
+import { MergeView, type MergeFile } from '@/components/tools/merge-view'
+import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
+import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
+import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
+import { EditTextView, type EditResult } from '@/components/tools/edit-text-view'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -61,6 +66,8 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text']
+
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
   const Icon = tool.icon
@@ -70,8 +77,15 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const [options, setOptions] = React.useState<ToolOptionsMap>(() =>
     defaultOptions(tool.id)
   )
+  const [interactiveResult, setInteractiveResult] = React.useState<
+    OrganizeResult | CropResult | SignResult | EditResult | null
+  >(null)
+  const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
+  const addMoreInputRef = React.useRef<HTMLInputElement>(null)
   const implemented = isImplemented(tool.id)
   const preview = !implemented
+  const isInteractive = INTERACTIVE_TOOLS.includes(tool.id)
+  const isMerge = tool.id === 'merge'
 
   const processing = useProcessing()
 
@@ -86,17 +100,39 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setFiles([])
     setHtml('')
     setOptions(defaultOptions(tool.id))
+    setInteractiveResult(null)
+    setMergeOrder([])
   }, [tool.id])
+
+  // Sync mergeOrder when files change (add new files to the end)
+  React.useEffect(() => {
+    if (isMerge) {
+      const fileIds = new Set(files.map((f) => f.id))
+      setMergeOrder((prev) => {
+        const kept = prev.filter((id) => fileIds.has(id))
+        const newIds = files.filter((f) => !kept.includes(f.id)).map((f) => f.id)
+        return [...kept, ...newIds]
+      })
+    }
+  }, [files, isMerge])
+
+  // Ordered merge files
+  const mergeFiles: MergeFile[] = isMerge
+    ? mergeOrder
+        .map((id) => files.find((f) => f.id === id))
+        .filter((f): f is QueuedFile => !!f)
+        .map((f) => ({ id: f.id, file: f.file }))
+    : []
 
   const canProcess =
     cfg.mode === 'files'
       ? files.length > 0
       : html.trim().length > 0
 
-  // Protect requires a password before the run button is enabled.
   const needsPassword = tool.id === 'protect'
   const hasPassword = String(options.password ?? '').length > 0
-  const runEnabled = canProcess && (!needsPassword || hasPassword) && !processing.isWorking
+  const interactiveReady = isInteractive ? interactiveResult !== null : true
+  const runEnabled = canProcess && interactiveReady && (!needsPassword || hasPassword) && !processing.isWorking
 
   const handleProcess = async () => {
     if (!canProcess || processing.isWorking) return
@@ -105,6 +141,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let inputs: { fileName: string; data: ArrayBuffer; size: number }[] = []
     let mode: 'per-file' | 'single' = 'per-file'
     let singleLabel: string | undefined
+    let runOptions = options
 
     if (cfg.mode === 'text') {
       const data = new TextEncoder().encode(html).buffer as ArrayBuffer
@@ -112,20 +149,49 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       mode = 'single'
       singleLabel = 'HTML → PDF output'
     } else {
-      for (const qf of files) {
+      // For merge, use the drag-ordered files; otherwise use files as-is
+      const orderedFiles = isMerge
+        ? mergeFiles.map((mf) => files.find((f) => f.id === mf.id)!).filter(Boolean)
+        : files
+      for (const qf of orderedFiles) {
         const data = await qf.file.arrayBuffer()
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
       }
-      if (tool.id === 'merge') {
+      if (isMerge) {
         mode = 'single'
         singleLabel = 'Merged document'
       } else if (tool.id === 'images-to-pdf' && options.output === 'single') {
         mode = 'single'
         singleLabel = 'Combined image PDF'
+      } else if (isInteractive) {
+        mode = 'single'
+        singleLabel = tool.name + ' output'
+        runOptions = { ...options, ...(interactiveResult as object) }
       }
     }
 
-    await processing.run({ processor, mode, inputs, options, singleLabel })
+    await processing.run({ processor, mode, inputs, options: runOptions, singleLabel })
+  }
+
+  // Merge file handlers
+  const handleMergeReorder = (reordered: MergeFile[]) => {
+    setMergeOrder(reordered.map((f) => f.id))
+  }
+  const handleMergeRemove = (id: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id))
+  }
+  const handleAddMore = () => {
+    addMoreInputRef.current?.click()
+  }
+  const handleAddMoreChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.length) {
+      const newFiles: QueuedFile[] = Array.from(e.target.files).map((file) => ({
+        id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        file,
+      }))
+      setFiles((prev) => [...prev, ...newFiles])
+    }
+    e.target.value = ''
   }
 
   const buttonLabel = processing.isWorking
@@ -207,7 +273,30 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         transition={{ duration: 0.45, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
         className="mt-8 rounded-3xl border border-border/70 bg-card p-5 shadow-sm sm:p-7"
       >
-        {cfg.mode === 'files' ? (
+        {/* Hidden input for "add more files" (merge) */}
+        <input
+          ref={addMoreInputRef}
+          type="file"
+          accept="application/pdf"
+          multiple
+          className="hidden"
+          onChange={handleAddMoreChange}
+        />
+
+        {isMerge && files.length > 0 ? (
+          <MergeView
+            files={mergeFiles}
+            onReorder={handleMergeReorder}
+            onRemove={handleMergeRemove}
+            onAddMore={handleAddMore}
+          />
+        ) : isInteractive && files.length > 0 ? (
+          <InteractiveEditor
+            toolId={tool.id}
+            file={files[0].file}
+            onResultChange={setInteractiveResult}
+          />
+        ) : cfg.mode === 'files' ? (
           <Dropzone
             files={files}
             onFilesChange={setFiles}
@@ -349,4 +438,20 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       )}
     </div>
   )
+}
+
+function InteractiveEditor({
+  toolId,
+  file,
+  onResultChange,
+}: {
+  toolId: string
+  file: File
+  onResultChange: (result: OrganizeResult | CropResult | SignResult | EditResult | null) => void
+}) {
+  if (toolId === 'organize') return <OrganizePdfView file={file} onResultChange={onResultChange} />
+  if (toolId === 'crop') return <CropPdfView file={file} onResultChange={onResultChange} />
+  if (toolId === 'sign-annotate') return <SignAnnotateView file={file} onResultChange={onResultChange} />
+  if (toolId === 'edit-text') return <EditTextView file={file} onResultChange={onResultChange} />
+  return null
 }

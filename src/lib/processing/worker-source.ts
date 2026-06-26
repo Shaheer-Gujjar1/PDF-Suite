@@ -237,60 +237,101 @@ function fmtBytes(n) {
   return parseFloat((n / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/* ---- Compress PDF (3 levels: structural / rasterize / aggressive) ------ */
-/* Low: object streams + metadata strip (lossless, minimal reduction).
-   Normal: render each page to JPEG q0.7 at 1.5x → new PDF (good reduction, loses text selectability).
-   Extreme: render each page to JPEG q0.4 at 1.0x → new PDF (max reduction, lower quality). */
+/* ---- Compress PDF (3 levels with smart fallback) ----------------------- */
+/* Low: lossless structural (object streams + strip metadata). ~3-7% on verbose PDFs.
+   Normal: rasterize at 1.0x → JPEG q0.5. Falls back to lossless if rasterized is larger.
+   Extreme: rasterize at 0.6x → JPEG q0.3. Falls back to normal if larger. */
 processors['compress'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
   var level = (opts && opts.level) || 'normal';
   var out = [];
+
+  /* Helper: lossless structural compression */
+  async function losslessCompress(data) {
+    var doc = await lib.PDFDocument.load(data, { ignoreEncryption: true });
+    try {
+      doc.setTitle(''); doc.setAuthor(''); doc.setSubject('');
+      doc.setKeywords([]); doc.setCreator(''); doc.setProducer('');
+    } catch (_) {}
+    return await doc.save({ useObjectStreams: true, addDefaultPage: false });
+  }
+
+  /* Helper: rasterize pages to JPEG → new PDF */
+  async function rasterize(data, scale, quality, progressBase, progressSpan) {
+    var pdfjs = await loadPdfJs();
+    var srcDoc = await pdfjs.getDocument({ data: new Uint8Array(data), useWorkerFetch: false, isEvalSupported: false }).promise;
+    var newDoc = await lib.PDFDocument.create();
+    var pageCount = srcDoc.numPages;
+    for (var p = 1; p <= pageCount; p++) {
+      var page = await srcDoc.getPage(p);
+      var viewport = page.getViewport({ scale: scale });
+      var w = Math.max(1, Math.ceil(viewport.width));
+      var h = Math.max(1, Math.ceil(viewport.height));
+      var canvas = new OffscreenCanvas(w, h);
+      var ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not get 2D context for page ' + p);
+      /* White background (JPEG doesn't support transparency) */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+      var jpgBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality });
+      var jpgArr = new Uint8Array(await jpgBlob.arrayBuffer());
+      var img = await newDoc.embedJpg(jpgArr);
+      var newPage = newDoc.addPage([viewport.width, viewport.height]);
+      newPage.drawImage(img, { x: 0, y: 0, width: viewport.width, height: viewport.height });
+      try { await page.cleanup(); } catch (_) {}
+      onProgress(progressBase + (progressSpan * (p / pageCount)));
+    }
+    try { await srcDoc.destroy(); } catch (_) {}
+    return await newDoc.save({ useObjectStreams: true });
+  }
+
   for (var i = 0; i < inputs.length; i++) {
     var orig = inputs[i].data.byteLength;
     log('Compressing ' + inputs[i].fileName + ' (' + fmtBytes(orig) + ') — ' + level);
     var bytes;
+    var usedFallback = false;
 
     if (level === 'low') {
-      /* Structural only: object streams + metadata strip */
-      var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
-      try { doc.setTitle(''); doc.setAuthor(''); doc.setSubject(''); doc.setKeywords([]); doc.setCreator(''); doc.setProducer('PDF Suite'); } catch (_) {}
-      bytes = await doc.save({ useObjectStreams: true, addDefaultPage: false });
+      bytes = await losslessCompress(inputs[i].data);
+      onProgress((i + 1) / inputs.length);
     } else {
-      /* Rasterize pages → JPEG → new PDF (real compression) */
-      var scale = level === 'extreme' ? 1.0 : 1.5;
-      var quality = level === 'extreme' ? 0.4 : 0.7;
-      var pdfjs = await loadPdfJs();
-      var srcDoc = await pdfjs.getDocument({ data: new Uint8Array(inputs[i].data), useWorkerFetch: false, isEvalSupported: false }).promise;
-      var newDoc = await lib.PDFDocument.create();
-      var pageCount = srcDoc.numPages;
-      for (var p = 1; p <= pageCount; p++) {
-        var page = await srcDoc.getPage(p);
-        var viewport = page.getViewport({ scale: scale });
-        var canvas = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-        var ctx = canvas.getContext('2d');
-        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
-        var jpgBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality });
-        var jpgArr = new Uint8Array(await jpgBlob.arrayBuffer());
-        var img = await newDoc.embedJpg(jpgArr);
-        var newPage = newDoc.addPage([viewport.width, viewport.height]);
-        newPage.drawImage(img, { x: 0, y: 0, width: viewport.width, height: viewport.height });
-        try { await page.cleanup(); } catch (_) {}
-        onProgress((i + (p / pageCount)) / inputs.length);
+      /* Rasterize with level-specific params */
+      var scale = level === 'extreme' ? 0.6 : 1.0;
+      var quality = level === 'extreme' ? 0.3 : 0.5;
+      var rasterBytes = await rasterize(inputs[i].data, scale, quality, i / inputs.length, 0.8 / inputs.length);
+
+      /* Smart fallback: if rasterized is LARGER than original, use lossless instead */
+      if (rasterBytes.byteLength >= orig) {
+        log('Rasterized result larger than original — falling back to lossless');
+        bytes = await losslessCompress(inputs[i].data);
+        usedFallback = true;
+      } else {
+        /* For extreme, if the result is still not great, try even lower quality */
+        if (level === 'extreme' && rasterBytes.byteLength > orig * 0.5) {
+          var extremeBytes = await rasterize(inputs[i].data, 0.5, 0.25, (i + 0.8) / inputs.length, 0.2 / inputs.length);
+          if (extremeBytes.byteLength < rasterBytes.byteLength) {
+            bytes = extremeBytes;
+          } else {
+            bytes = rasterBytes;
+          }
+        } else {
+          bytes = rasterBytes;
+        }
       }
-      try { await srcDoc.destroy(); } catch (_) {}
-      bytes = await newDoc.save({ useObjectStreams: true });
+      onProgress((i + 1) / inputs.length);
     }
 
     var comp = bytes.byteLength;
     var pct = orig > 0 ? Math.round((1 - comp / orig) * 100) : 0;
     var note = fmtBytes(orig) + ' → ' + fmtBytes(comp) + (pct > 0 ? ' (' + pct + '% smaller)' : (pct < 0 ? ' (' + (-pct) + '% larger)' : ' (no change)'));
+    if (usedFallback) note += ' · lossless fallback';
     out.push({
       name: stripExt(inputs[i].fileName) + '-compressed.pdf',
       data: toArrayBuffer(bytes),
       mime: 'application/pdf',
       note: note
     });
-    if (level === 'low') onProgress((i + 1) / inputs.length);
   }
   onProgress(1);
   return out;
@@ -447,13 +488,24 @@ async function loadPdfJs() {
   if (self.pdfjsLib) return self.pdfjsLib;
   // pdf.js fake-worker setup checks for document even inside a worker.
   // Polyfill the minimal surface it needs so loading succeeds here.
+  // NOTE: createElement('canvas') returns a fake element — pdf.js rendering
+  // uses OffscreenCanvas directly in workers, not document.createElement.
   if (typeof self.document === 'undefined') {
-    var fakeEl = { style: {}, appendChild: function () {}, setAttribute: function () {}, getContext: function () { return null; } };
+    var fakeEl = { style: {}, appendChild: function () {}, setAttribute: function () {}, remove: function () {}, addEventListener: function () {} };
+    /* createElement('canvas') returns a real OffscreenCanvas so pdf.js can
+       call getContext('2d') on it for rendering. */
+    function makeCanvas() {
+      try { return new OffscreenCanvas(1, 1); } catch (_) { return fakeEl; }
+    }
     self.document = {
-      createElement: function () { return fakeEl; },
+      createElement: function (tag) {
+        if (tag === 'canvas') return makeCanvas();
+        return fakeEl;
+      },
       createElementNS: function () { return fakeEl; },
       currentScript: { src: '' },
       body: fakeEl, head: fakeEl, documentElement: fakeEl,
+      addEventListener: function () {},
     };
     self.window = self;
   }
