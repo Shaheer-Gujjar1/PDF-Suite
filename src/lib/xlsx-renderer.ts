@@ -3,16 +3,14 @@
 /**
  * Main-thread XLSX → page images renderer.
  *
- * Uses SheetJS to parse the spreadsheet, renders it as a styled HTML table
- * in a hidden div (all inline styles — no oklch), captures with html2canvas,
- * and splits into A4 pages at safe break points.
+ * Parses the spreadsheet with SheetJS, then draws it DIRECTLY to a canvas
+ * using the Canvas 2D API — no html2canvas, no iframes, no CSS conflicts.
+ * Preserves cell colors, merges, borders, fonts, alignment, column widths.
  */
 
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'
-const HTML2CANVAS_URL = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
 
 let xlsxPromise: Promise<any> | null = null
-let html2canvasPromise: Promise<any> | null = null
 
 function loadScript(url: string, check: () => boolean): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -34,12 +32,6 @@ function loadXLSX(): Promise<any> {
   return xlsxPromise
 }
 
-function loadHtml2Canvas(): Promise<any> {
-  if (html2canvasPromise) return html2canvasPromise
-  html2canvasPromise = loadScript(HTML2CANVAS_URL, () => !!(window as any).html2canvas).then(() => (window as any).html2canvas)
-  return html2canvasPromise
-}
-
 export interface RenderedPage {
   dataUrl: string
   width: number
@@ -50,34 +42,53 @@ export interface RenderProgress {
   (progress: number, message: string): void
 }
 
-/** Convert ARGB hex to CSS rgb */
-function argbToRgb(hex: string): string {
-  if (!hex || hex === '00000000' || hex === 'FFFFFFFF') return ''
+/** Convert ARGB hex to {r,g,b} */
+function argbToRgb(hex: string): { r: number; g: number; b: number } | null {
+  if (!hex || hex === '00000000' || hex === 'FFFFFFFF') return null
   const h = hex.replace(/^FF/, '')
   if (h.length === 6) {
-    const r = parseInt(h.slice(0, 2), 16)
-    const g = parseInt(h.slice(2, 4), 16)
-    const b = parseInt(h.slice(4, 6), 16)
-    return `rgb(${r},${g},${b})`
+    return {
+      r: parseInt(h.slice(0, 2), 16),
+      g: parseInt(h.slice(2, 4), 16),
+      b: parseInt(h.slice(4, 6), 16),
+    }
   }
-  return ''
+  return null
 }
 
-/** Convert column number to letter (0 → A, 1 → B, etc.) */
-function colToLetter(col: number): string {
-  let result = ''
-  col++
-  while (col > 0) {
-    const rem = (col - 1) % 26
-    result = String.fromCharCode(65 + rem) + result
-    col = Math.floor((col - 1) / 26)
-  }
-  return result
+interface CellStyle {
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  fontSize: number
+  fontColor: string
+  bgColor: string
+  align: string
+  valign: string
+  borders: { top?: string; bottom?: string; left?: string; right?: string }
 }
 
-/** Build HTML table from a worksheet with styling */
-function sheetToHtml(ws: any, XLSX: any): string {
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
+interface ParsedCell {
+  text: string
+  style: CellStyle
+  rowspan: number
+  colspan: number
+  hidden: boolean
+}
+
+interface ParsedSheet {
+  name: string
+  cells: ParsedCell[][]
+  colWidths: number[]
+  rowHeights: number[]
+  totalWidth: number
+  totalHeight: number
+}
+
+/** Parse a worksheet into a structured format with styling */
+function parseWorksheet(ws: any, XLSX: any): ParsedSheet | null {
+  if (!ws['!ref']) return null
+  const range = XLSX.utils.decode_range(ws['!ref'])
   const merges = ws['!merges'] || []
   const cols = ws['!cols'] || []
   const rows = ws['!rows'] || []
@@ -99,126 +110,226 @@ function sheetToHtml(ws: any, XLSX: any): string {
     }
   }
 
-  let html = '<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px;width:100%;">\n'
-
-  // Column widths
-  for (let c = range.s.c; c <= range.e.c; c++) {
-    const col = cols[c]
-    const width = col && col.wpx ? col.wpx : 80
-    html += `<col style="width:${width}px;">`
+  const defaultStyle: CellStyle = {
+    bold: false, italic: false, underline: false,
+    fontSize: 11, fontColor: '#000000', bgColor: '#ffffff',
+    align: 'left', valign: 'middle',
+    borders: {},
   }
 
+  const cells: ParsedCell[][] = []
+  const colWidths: number[] = []
+  const rowHeights: number[] = []
+
+  // Column widths (in pixels, default 80)
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const col = cols[c]
+    colWidths.push(col && col.wpx ? col.wpx : 90)
+  }
+
+  // Row heights (in pixels, default 22)
   for (let r = range.s.r; r <= range.e.r; r++) {
     const row = rows[r]
-    const rowHeight = row && row.hpt ? row.hpt : 20
-    html += `<tr style="height:${rowHeight}pt;">`
+    rowHeights.push(row && row.hpt ? Math.round(row.hpt * 1.333) : 22)
+  }
 
+  // Parse cells
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const rowCells: ParsedCell[] = []
     for (let c = range.s.c; c <= range.e.c; c++) {
       const cellAddr = XLSX.utils.encode_cell({ r, c })
       const cell = ws[cellAddr]
       const merge = mergeMap[`${r},${c}`]
 
-      if (merge && merge.hidden) continue
+      if (merge && merge.hidden) {
+        rowCells.push({ text: '', style: defaultStyle, rowspan: 0, colspan: 0, hidden: true })
+        continue
+      }
 
-      const rowspan = merge ? merge.rowspan : 1
-      const colspan = merge ? merge.colspan : 1
-      const attrs: string[] = []
-      if (rowspan > 1) attrs.push(`rowspan="${rowspan}"`)
-      if (colspan > 1) attrs.push(`colspan="${colspan}"`)
+      const style: CellStyle = { ...defaultStyle }
 
-      // Cell styling — all inline, no oklch/lab
-      const styles: string[] = [
-        'border:1px solid #b0b0b0',
-        'padding:4px 6px',
-        'vertical-align:middle',
-        'background:#ffffff',
-        'color:#000000',
-      ]
-      let content = '&nbsp;'
-
+      let text = ''
       if (cell) {
-        // Font style (cell.s may be undefined in community edition — use defaults)
+        // Font
         const font = cell.s?.font || {}
-        if (font.bold) styles.push('font-weight:bold')
-        if (font.italic) styles.push('font-style:italic')
-        if (font.underline) styles.push('text-decoration:underline')
-        if (font.sz) styles.push(`font-size:${font.sz}pt`)
+        if (font.bold) style.bold = true
+        if (font.italic) style.italic = true
+        if (font.underline) style.underline = true
+        if (font.sz) style.fontSize = font.sz
         if (font.color?.rgb) {
-          const c = argbToRgb(font.color.rgb)
-          if (c) styles.push(`color:${c}`)
+          const rgb = argbToRgb(font.color.rgb)
+          if (rgb) style.fontColor = `rgb(${rgb.r},${rgb.g},${rgb.b})`
         }
 
         // Fill
         const fill = cell.s?.fill
         if (fill?.fgColor?.rgb && fill.fgColor.rgb !== '00000000') {
-          const bg = argbToRgb(fill.fgColor.rgb)
-          if (bg) styles.push(`background:${bg}`)
+          const rgb = argbToRgb(fill.fgColor.rgb)
+          if (rgb) style.bgColor = `rgb(${rgb.r},${rgb.g},${rgb.b})`
         }
 
         // Alignment
         const align = cell.s?.alignment || {}
-        if (align.horizontal) styles.push(`text-align:${align.horizontal}`)
-        if (align.wrapText) styles.push('white-space:normal')
+        if (align.horizontal) style.align = align.horizontal
+        if (align.vertical) style.valign = align.vertical
 
-        // Border
+        // Borders
         const border = cell.s?.border || {}
-        if (border.top?.style || border.bottom?.style || border.left?.style || border.right?.style) {
-          const idx = styles.findIndex(s => s.startsWith('border:'))
-          if (idx >= 0) styles.splice(idx, 1)
-          for (const [side, key] of [['top', 'top'], ['bottom', 'bottom'], ['left', 'left'], ['right', 'right']] as [string, string][]) {
-            const b = border[key]
-            if (b && b.style) {
-              const bw = b.style === 'thin' ? '1px' : '2px'
-              const bc = b.color?.rgb ? argbToRgb(b.color.rgb) || '#000000' : '#000000'
-              styles.push(`border-${side}:${bw} solid ${bc}`)
-            } else {
-              styles.push(`border-${side}:1px solid #b0b0b0`)
-            }
-          }
+        if (border.top?.style) {
+          const bc = border.top.color?.rgb ? argbToRgb(border.top.color.rgb) : null
+          style.borders.top = bc ? `rgb(${bc.r},${bc.g},${bc.b})` : '#000000'
+        }
+        if (border.bottom?.style) {
+          const bc = border.bottom.color?.rgb ? argbToRgb(border.bottom.color.rgb) : null
+          style.borders.bottom = bc ? `rgb(${bc.r},${bc.g},${bc.b})` : '#000000'
+        }
+        if (border.left?.style) {
+          const bc = border.left.color?.rgb ? argbToRgb(border.left.color.rgb) : null
+          style.borders.left = bc ? `rgb(${bc.r},${bc.g},${bc.b})` : '#000000'
+        }
+        if (border.right?.style) {
+          const bc = border.right.color?.rgb ? argbToRgb(border.right.color.rgb) : null
+          style.borders.right = bc ? `rgb(${bc.r},${bc.g},${bc.b})` : '#000000'
         }
 
-        // Content — use cell.w (formatted) if available, else cell.v
-        if (cell.w !== undefined && cell.w !== null) {
-          content = String(cell.w)
-        } else if (cell.v !== undefined && cell.v !== null) {
-          content = String(cell.v)
-        }
-        // Escape HTML
-        content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        if (!content) content = '&nbsp;'
+        // Content
+        if (cell.w !== undefined && cell.w !== null) text = String(cell.w)
+        else if (cell.v !== undefined && cell.v !== null) text = String(cell.v)
       }
 
-      html += `<td${attrs.length ? ' ' + attrs.join(' ') : ''} style="${styles.join(';')}">${content}</td>`
+      rowCells.push({
+        text,
+        style,
+        rowspan: merge ? merge.rowspan : 1,
+        colspan: merge ? merge.colspan : 1,
+        hidden: false,
+      })
     }
-    html += '</tr>\n'
+    cells.push(rowCells)
   }
-  html += '</table>'
-  return html
+
+  const totalWidth = colWidths.reduce((a, b) => a + b, 0)
+  const totalHeight = rowHeights.reduce((a, b) => a + b, 0)
+
+  return { name: '', cells, colWidths, rowHeights, totalWidth, totalHeight }
 }
 
-function findSafeBreakPoint(
+/** Draw a parsed sheet onto a canvas at the given position */
+function drawSheet(
   ctx: CanvasRenderingContext2D,
-  startY: number,
-  targetY: number,
-  maxSearch: number,
-  canvasWidth: number
-): number {
-  const sampleStep = 2
-  for (let offset = 0; offset <= maxSearch; offset++) {
-    for (const y of [targetY + offset, targetY - offset]) {
-      if (y < startY || y >= ctx.canvas.height) continue
-      let isWhite = true
-      const rowData = ctx.getImageData(0, y, canvasWidth, 1).data
-      for (let x = 0; x < canvasWidth; x += sampleStep) {
-        if (rowData[x * 4] < 250 || rowData[x * 4 + 1] < 250 || rowData[x * 4 + 2] < 250) {
-          isWhite = false
-          break
-        }
+  sheet: ParsedSheet,
+  offsetX: number,
+  offsetY: number,
+  scale: number
+): { width: number; height: number } {
+  const { cells, colWidths, rowHeights } = sheet
+  ctx.save()
+  ctx.scale(scale, scale)
+
+  // Calculate column X positions
+  const colX: number[] = [0]
+  for (let i = 0; i < colWidths.length; i++) {
+    colX.push(colX[i] + colWidths[i])
+  }
+
+  // Calculate row Y positions
+  const rowY: number[] = [0]
+  for (let i = 0; i < rowHeights.length; i++) {
+    rowY.push(rowY[i] + rowHeights[i])
+  }
+
+  // Draw cells
+  for (let r = 0; r < cells.length; r++) {
+    const row = cells[r]
+    for (let c = 0; c < row.length; c++) {
+      const cell = row[c]
+      if (cell.hidden) continue
+
+      const x = colX[c] + offsetX
+      const y = rowY[r] + offsetY
+      const w = colWidths.slice(c, c + cell.colspan).reduce((a, b) => a + b, 0)
+      const h = rowHeights.slice(r, r + cell.rowspan).reduce((a, b) => a + b, 0)
+
+      // Background
+      ctx.fillStyle = cell.style.bgColor
+      ctx.fillRect(x, y, w, h)
+
+      // Borders
+      ctx.strokeStyle = '#d0d0d0'
+      ctx.lineWidth = 1
+      // Default thin borders on all sides
+      ctx.strokeRect(x, y, w, h)
+      // Override with styled borders
+      if (cell.style.borders.top) {
+        ctx.strokeStyle = cell.style.borders.top
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        ctx.lineTo(x + w, y)
+        ctx.stroke()
       }
-      if (isWhite) return y
+      if (cell.style.borders.bottom) {
+        ctx.strokeStyle = cell.style.borders.bottom
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(x, y + h)
+        ctx.lineTo(x + w, y + h)
+        ctx.stroke()
+      }
+      if (cell.style.borders.left) {
+        ctx.strokeStyle = cell.style.borders.left
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(x, y)
+        ctx.lineTo(x, y + h)
+        ctx.stroke()
+      }
+      if (cell.style.borders.right) {
+        ctx.strokeStyle = cell.style.borders.right
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.moveTo(x + w, y)
+        ctx.lineTo(x + w, y + h)
+        ctx.stroke()
+      }
+
+      // Text
+      if (cell.text) {
+        const fontSize = cell.style.fontSize
+        ctx.font = `${cell.style.bold ? 'bold ' : ''}${cell.style.italic ? 'italic ' : ''}${fontSize}px Arial, sans-serif`
+        ctx.fillStyle = cell.style.fontColor
+        ctx.textBaseline = 'middle'
+
+        // Alignment
+        let textAlign = 'left'
+        let textX = x + 5
+        if (cell.style.align === 'center') {
+          textAlign = 'center'
+          textX = x + w / 2
+        } else if (cell.style.align === 'right') {
+          textAlign = 'right'
+          textX = x + w - 5
+        }
+        ctx.textAlign = textAlign as CanvasTextAlign
+
+        // Vertical alignment
+        let textY = y + h / 2
+        if (cell.style.valign === 'top') textY = y + fontSize * 0.7
+        else if (cell.style.valign === 'bottom') textY = y + h - fontSize * 0.5
+
+        // Clip text to cell
+        ctx.save()
+        ctx.beginPath()
+        ctx.rect(x + 2, y + 1, w - 4, h - 2)
+        ctx.clip()
+        ctx.fillText(cell.text, textX, textY)
+        ctx.restore()
+      }
     }
   }
-  return targetY
+
+  ctx.restore()
+  return { width: sheet.totalWidth, height: sheet.totalHeight }
 }
 
 export async function renderXlsxToPages(
@@ -227,119 +338,163 @@ export async function renderXlsxToPages(
 ): Promise<RenderedPage[]> {
   onProgress?.(0.1, 'Loading spreadsheet engine…')
   const XLSX = await loadXLSX()
-  const html2canvas = await loadHtml2Canvas()
 
   onProgress?.(0.2, 'Parsing spreadsheet…')
   const arrayBuffer = await file.arrayBuffer()
-  // cellStyles: true to read style info (works with xlsx.full.min.js)
   const wb = XLSX.read(arrayBuffer, { type: 'array', cellStyles: true, cellDates: true, cellNF: true })
 
-  // Build HTML for all sheets
-  let sheetsHtml = ''
+  // Parse all sheets
+  const sheets: ParsedSheet[] = []
   for (let i = 0; i < wb.SheetNames.length; i++) {
-    const sheetName = wb.SheetNames[i]
-    const ws = wb.Sheets[sheetName]
-    if (!ws['!ref']) continue
-    sheetsHtml += `<div style="font-family:Arial,sans-serif;font-size:16px;font-weight:bold;margin:16px 0 8px 0;color:#2F5496;padding:4px 0;border-bottom:2px solid #2F5496;">${sheetName}</div>\n`
-    sheetsHtml += sheetToHtml(ws, XLSX)
-    sheetsHtml += '<div style="height:24px;"></div>\n'
+    const ws = wb.Sheets[wb.SheetNames[i]]
+    const parsed = parseWorksheet(ws, XLSX)
+    if (parsed) {
+      parsed.name = wb.SheetNames[i]
+      sheets.push(parsed)
+    }
   }
 
-  if (!sheetsHtml) {
+  if (sheets.length === 0) {
     throw new Error('No sheets found in the spreadsheet')
   }
 
-  // A4 dimensions
+  onProgress?.(0.4, 'Rendering spreadsheet…')
+
+  // Calculate total canvas dimensions
+  const MARGIN = 40
+  const SHEET_GAP = 40
+  const TITLE_HEIGHT = 30
+  const SCALE = 2
+
+  // A4 dimensions at 96dpi
   const PAGE_WIDTH = 794
   const PAGE_HEIGHT = 1123
-  const SCALE = 2
-  const PAGE_HEIGHT_SCALED = PAGE_HEIGHT * SCALE
 
-  // Use an isolated iframe to avoid the app's oklch/lab CSS colors that
-  // html2canvas can't parse. The iframe only contains our inline-styled table.
-  const iframe = document.createElement('iframe')
-  iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${PAGE_WIDTH}px;height:${PAGE_HEIGHT * 2}px;border:none;`
-  document.body.appendChild(iframe)
+  // Calculate content width (max of all sheets)
+  let maxContentWidth = 0
+  let totalContentHeight = 0
+  for (const sheet of sheets) {
+    const sheetWidth = sheet.totalWidth + MARGIN * 2
+    const sheetHeight = sheet.totalHeight + TITLE_HEIGHT + MARGIN * 2 + SHEET_GAP
+    if (sheetWidth > maxContentWidth) maxContentWidth = sheetWidth
+    totalContentHeight += sheetHeight
+  }
 
-  const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
+  const canvasWidth = Math.max(maxContentWidth, PAGE_WIDTH) * SCALE
+  const canvasHeight = totalContentHeight * SCALE
 
-  iframeDoc.open()
-  iframeDoc.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      body { background: #fff; padding: 40px; }
-    </style>
-  </head><body><div id="xlsx-content">${sheetsHtml}</div></body></html>`)
-  iframeDoc.close()
+  // Create the master canvas
+  const masterCanvas = document.createElement('canvas')
+  masterCanvas.width = canvasWidth
+  masterCanvas.height = canvasHeight
+  const ctx = masterCanvas.getContext('2d')!
 
-  const inner = iframeDoc.getElementById('xlsx-content')!
+  // White background
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, canvasWidth, canvasHeight)
 
-  try {
-    onProgress?.(0.5, 'Capturing spreadsheet…')
-    // Wait for layout and fonts
-    await new Promise((r) => setTimeout(r, 300))
+  // Draw each sheet
+  let currentY = 0
+  for (let i = 0; i < sheets.length; i++) {
+    const sheet = sheets[i]
 
-    const contentHeight = inner.scrollHeight
+    // Sheet title
+    ctx.save()
+    ctx.scale(SCALE, SCALE)
+    ctx.font = 'bold 16px Arial, sans-serif'
+    ctx.fillStyle = '#2F5496'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    ctx.fillText(sheet.name, MARGIN, currentY + MARGIN)
+    // Title underline
+    ctx.strokeStyle = '#2F5496'
+    ctx.lineWidth = 2
+    ctx.beginPath()
+    ctx.moveTo(MARGIN, currentY + MARGIN + TITLE_HEIGHT - 5)
+    ctx.lineTo(MARGIN + sheet.totalWidth, currentY + MARGIN + TITLE_HEIGHT - 5)
+    ctx.stroke()
+    ctx.restore()
 
-    // Call html2canvas from the iframe's window so it clones the iframe's
-    // document (which has no oklch colors), not the main app's document
-    const iframeWin = iframe.contentWindow as any
-    const iframeHtml2Canvas = iframeWin.html2canvas || html2canvas
-    const canvas = await iframeHtml2Canvas(inner, {
-      scale: SCALE,
-      useCORS: true,
-      backgroundColor: '#ffffff',
-      width: PAGE_WIDTH - 80,
-      height: contentHeight,
-      windowWidth: PAGE_WIDTH,
-    })
+    // Draw the sheet data
+    const drawResult = drawSheet(
+      ctx,
+      sheet,
+      MARGIN,
+      currentY + MARGIN + TITLE_HEIGHT,
+      SCALE
+    )
 
-    onProgress?.(0.7, 'Splitting into pages…')
+    currentY += MARGIN + TITLE_HEIGHT + sheet.totalHeight + SHEET_GAP + MARGIN
+    onProgress?.(0.4 + (0.3 * (i + 1) / sheets.length), 'Rendering sheet ' + (i + 1) + ' of ' + sheets.length)
+  }
 
-    const ctx = canvas.getContext('2d')!
-    const canvasWidth = canvas.width
-    const totalHeight = canvas.height
-    const pages: RenderedPage[] = []
+  onProgress?.(0.7, 'Splitting into pages…')
 
-    let currentY = 0
-    let pageNum = 0
+  // Split into A4 pages at safe break points
+  const pageHeightScaled = PAGE_HEIGHT * SCALE
+  const pages: RenderedPage[] = []
+  let y = 0
+  let pageNum = 0
 
-    while (currentY < totalHeight) {
-      const idealBreak = currentY + PAGE_HEIGHT_SCALED
+  while (y < canvasHeight) {
+    const idealBreak = y + pageHeightScaled
 
-      if (idealBreak >= totalHeight) {
-        const remainingHeight = totalHeight - currentY
-        const pageCanvas = document.createElement('canvas')
-        pageCanvas.width = canvasWidth
-        pageCanvas.height = Math.max(1, remainingHeight)
-        const pageCtx = pageCanvas.getContext('2d')!
-        pageCtx.fillStyle = '#ffffff'
-        pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
-        pageCtx.drawImage(canvas, 0, currentY, canvasWidth, remainingHeight, 0, 0, canvasWidth, remainingHeight)
-        pages.push({ dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92), width: PAGE_WIDTH - 80, height: remainingHeight / SCALE })
-        break
-      }
-
-      const searchRange = 100
-      const safeY = findSafeBreakPoint(ctx, currentY, idealBreak, searchRange, canvasWidth)
-      const pageHeight = safeY - currentY
+    if (idealBreak >= canvasHeight) {
+      // Last page — take remaining content
+      const remainingHeight = canvasHeight - y
       const pageCanvas = document.createElement('canvas')
       pageCanvas.width = canvasWidth
-      pageCanvas.height = pageHeight
+      pageCanvas.height = Math.max(1, remainingHeight)
       const pageCtx = pageCanvas.getContext('2d')!
       pageCtx.fillStyle = '#ffffff'
       pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
-      pageCtx.drawImage(canvas, 0, currentY, canvasWidth, pageHeight, 0, 0, canvasWidth, pageHeight)
-      pages.push({ dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92), width: PAGE_WIDTH - 80, height: pageHeight / SCALE })
-
-      currentY = safeY
-      pageNum++
-      onProgress?.(0.7 + (0.3 * pageNum / Math.ceil(totalHeight / PAGE_HEIGHT_SCALED)), 'Page ' + (pageNum + 1))
+      pageCtx.drawImage(masterCanvas, 0, y, canvasWidth, remainingHeight, 0, 0, canvasWidth, remainingHeight)
+      pages.push({
+        dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92),
+        width: canvasWidth / SCALE,
+        height: remainingHeight / SCALE,
+      })
+      break
     }
 
-    onProgress?.(1, 'Done')
-    return pages
-  } finally {
-    document.body.removeChild(iframe)
+    // Find a safe break point — a fully white row
+    let safeY = idealBreak
+    const searchRange = 80 * SCALE // Search ±80px (scaled)
+    for (let offset = 0; offset <= searchRange; offset += SCALE) {
+      for (const checkY of [idealBreak + offset, idealBreak - offset]) {
+        if (checkY < y || checkY >= canvasHeight) continue
+        let isWhite = true
+        const rowData = ctx.getImageData(0, checkY, canvasWidth, 1).data
+        for (let x = 0; x < canvasWidth; x += 4) {
+          if (rowData[x * 4] < 250 || rowData[x * 4 + 1] < 250 || rowData[x * 4 + 2] < 250) {
+            isWhite = false
+            break
+          }
+        }
+        if (isWhite) { safeY = checkY; break }
+      }
+      if (safeY !== idealBreak) break
+    }
+
+    const pageHeight = safeY - y
+    const pageCanvas = document.createElement('canvas')
+    pageCanvas.width = canvasWidth
+    pageCanvas.height = pageHeight
+    const pageCtx = pageCanvas.getContext('2d')!
+    pageCtx.fillStyle = '#ffffff'
+    pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
+    pageCtx.drawImage(masterCanvas, 0, y, canvasWidth, pageHeight, 0, 0, canvasWidth, pageHeight)
+    pages.push({
+      dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92),
+      width: canvasWidth / SCALE,
+      height: pageHeight / SCALE,
+    })
+
+    y = safeY
+    pageNum++
+    onProgress?.(0.7 + (0.3 * (pageNum + 1) / Math.ceil(canvasHeight / pageHeightScaled)), 'Page ' + (pageNum + 1))
   }
+
+  onProgress?.(1, 'Done')
+  return pages
 }
