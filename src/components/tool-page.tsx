@@ -27,6 +27,7 @@ import { SplitView, type SplitConfig } from '@/components/tools/split-view'
 import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
 import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/images-to-pdf-view'
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
+import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -85,6 +86,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     OrganizeResult | CropResult | SignResult | EditResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
+  const [wordOrder, setWordOrder] = React.useState<string[]>([])
   const addMoreInputRef = React.useRef<HTMLInputElement>(null)
   const implemented = isImplemented(tool.id)
   const preview = !implemented
@@ -94,6 +96,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isRotate = tool.id === 'rotate'
   const isImagesToPdf = tool.id === 'images-to-pdf'
   const isPdfToImages = tool.id === 'pdf-to-images'
+  const isWordToPdf = tool.id === 'word-to-pdf'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -118,27 +121,37 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setOptions(defaultOptions(tool.id))
     setInteractiveResult(null)
     setMergeOrder([])
+    setWordOrder([])
     setSplitConfig({ mode: 'each', ranges: '' })
     setRotateConfig({ angle: 90 })
     setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
     setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
   }, [tool.id])
 
-  // Sync mergeOrder when files change (add new files to the end)
+  // Sync mergeOrder/wordOrder when files change (add new files to the end)
   React.useEffect(() => {
-    if (isMerge) {
+    if (isMerge || isWordToPdf) {
       const fileIds = new Set(files.map((f) => f.id))
-      setMergeOrder((prev) => {
+      const setter = isMerge ? setMergeOrder : setWordOrder
+      setter((prev) => {
         const kept = prev.filter((id) => fileIds.has(id))
         const newIds = files.filter((f) => !kept.includes(f.id)).map((f) => f.id)
         return [...kept, ...newIds]
       })
     }
-  }, [files, isMerge])
+  }, [files, isMerge, isWordToPdf])
 
   // Ordered merge files
   const mergeFiles: MergeFile[] = isMerge
     ? mergeOrder
+        .map((id) => files.find((f) => f.id === id))
+        .filter((f): f is QueuedFile => !!f)
+        .map((f) => ({ id: f.id, file: f.file }))
+    : []
+
+  // Ordered word files
+  const wordFiles: WordFile[] = isWordToPdf
+    ? wordOrder
         .map((id) => files.find((f) => f.id === id))
         .filter((f): f is QueuedFile => !!f)
         .map((f) => ({ id: f.id, file: f.file }))
@@ -169,10 +182,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       mode = 'single'
       singleLabel = 'HTML → PDF output'
     } else {
-      // For merge, use the drag-ordered files; otherwise use files as-is
+      // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
         ? mergeFiles.map((mf) => files.find((f) => f.id === mf.id)!).filter(Boolean)
-        : files
+        : isWordToPdf
+          ? wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
+          : files
       for (const qf of orderedFiles) {
         const data = await qf.file.arrayBuffer()
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
@@ -226,6 +241,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setMergeOrder(reordered.map((f) => f.id))
   }
   const handleMergeRemove = (id: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== id))
+  }
+  const handleWordReorder = (reordered: WordFile[]) => {
+    setWordOrder(reordered.map((f) => f.id))
+  }
+  const handleWordRemove = (id: string) => {
     setFiles((prev) => prev.filter((f) => f.id !== id))
   }
   const handleAddMore = () => {
@@ -325,7 +346,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept="application/pdf"
+          accept={isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isImagesToPdf ? 'image/*' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -366,6 +387,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onConfigChange={setPdfToImagesConfig}
             onRemoveFile={() => setFiles([])}
           />
+        ) : isWordToPdf && files.length > 0 ? (
+          <WordToPdfView
+            files={wordFiles}
+            onReorder={handleWordReorder}
+            onRemove={handleWordRemove}
+            onAddMore={handleAddMore}
+          />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
             toolId={tool.id}
@@ -399,7 +427,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}

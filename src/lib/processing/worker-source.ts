@@ -899,6 +899,40 @@ processors['html-to-pdf'] = async function (inputs, opts, onProgress, log) {
   var y = pageH - margin;
   var maxWidth = pageW - margin * 2;
 
+  /* Sanitize text for WinAnsi (CP-1252) encoding — pdf-lib StandardFonts
+     only support WinAnsi. Remove zero-width chars, replace common Unicode
+     punctuation, and strip any remaining non-encodable characters. */
+  function sanitizeText(text) {
+    return text
+      /* Remove zero-width characters */
+      .replace(/[\u200B\u200C\u200D\u200E\u200F\uFEFF]/g, '')
+      /* Replace common Unicode punctuation with WinAnsi equivalents */
+      .replace(/\u2018/g, "'")   /* left single quote */
+      .replace(/\u2019/g, "'")   /* right single quote */
+      .replace(/\u201A/g, "'")   /* single low-9 quote */
+      .replace(/\u201B/g, "'")   /* reversed-9 quote */
+      .replace(/\u201C/g, '"')   /* left double quote */
+      .replace(/\u201D/g, '"')   /* right double quote */
+      .replace(/\u201E/g, '"')   /* double low-9 quote */
+      .replace(/\u2013/g, '-')   /* en dash */
+      .replace(/\u2014/g, '--')  /* em dash */
+      .replace(/\u2026/g, '...') /* ellipsis */
+      .replace(/\u00A0/g, ' ')   /* non-breaking space */
+      .replace(/\u2022/g, '\u00B7') /* bullet → middle dot (WinAnsi 0xB7) */
+      .replace(/\u2010/g, '-')   /* hyphen */
+      .replace(/\u2011/g, '-')   /* non-breaking hyphen */
+      .replace(/\u2122/g, 'TM')  /* trademark */
+      .replace(/\u00A9/g, '(c)') /* copyright */
+      .replace(/\u00AE/g, '(r)') /* registered */
+      .replace(/\u20AC/g, 'EUR') /* euro */
+      /* Remove any remaining characters outside WinAnsi range
+         (keep 0x00-0xFF which covers ASCII + Latin-1, plus a few extras) */
+      .replace(/[\u0100-\uFFFF]/g, function (ch) {
+        /* Try to keep as-is if it's a common Latin extended char */
+        return '?';
+      });
+  }
+
   function newPage() { page = doc.addPage([pageW, pageH]); y = pageH - margin; }
 
   function wrapText(text, f, size) {
@@ -935,7 +969,7 @@ processors['html-to-pdf'] = async function (inputs, opts, onProgress, log) {
       else if (tag === '/strong' || tag === '/b') bold = false;
       continue;
     }
-    var decoded = part.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"').trim();
+    var decoded = sanitizeText(part.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').replace(/&#39;/g, "'").replace(/&quot;/g, '"').trim());
     if (!decoded) continue;
     var f = heading ? fontBold : (bold ? fontBold : font);
     var size = heading === 1 ? 24 : heading === 2 ? 20 : heading === 3 ? 16 : fontSize;
