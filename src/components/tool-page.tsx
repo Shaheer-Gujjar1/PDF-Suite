@@ -29,6 +29,7 @@ import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/imag
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { renderDocxToPages } from '@/lib/docx-renderer'
+import { renderXlsxToPages } from '@/lib/xlsx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -98,6 +99,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isImagesToPdf = tool.id === 'images-to-pdf'
   const isPdfToImages = tool.id === 'pdf-to-images'
   const isWordToPdf = tool.id === 'word-to-pdf'
+  const isExcelToPdf = tool.id === 'excel-to-pdf'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -231,6 +233,34 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
       mode = 'single'
       singleLabel = 'Word → PDF output'
+    } else if (isExcelToPdf) {
+      // Excel to PDF: pre-render XLSX to page images on the main thread
+      // (preserving colors, merges, borders, fonts), then send images to worker
+      for (const qf of files) {
+        try {
+          const pages = await renderXlsxToPages(qf.file)
+          if (pages.length === 0) throw new Error('No pages rendered')
+          for (const page of pages) {
+            const base64 = page.dataUrl.split(',')[1]
+            const binary = atob(base64)
+            const arr = new Uint8Array(binary.length)
+            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+            if (arr[0] !== 0xff || arr[1] !== 0xd8) throw new Error('Invalid JPEG data')
+            inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer, size: arr.buffer.byteLength })
+          }
+          const outputName = qf.file.name.replace(/\.xlsx?$/i, '')
+          actualProcessor = 'images-to-pdf'
+          runOptions = { ...options, output: 'single', pageSize: 'fit', outputName }
+        } catch (e) {
+          console.error('XLSX render failed, falling back:', e)
+          const data = await qf.file.arrayBuffer()
+          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+          actualProcessor = 'excel-to-pdf'
+          runOptions = options
+        }
+      }
+      mode = 'single'
+      singleLabel = 'Excel → PDF output'
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
@@ -396,7 +426,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept={isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isImagesToPdf ? 'image/*' : 'application/pdf'}
+          accept={isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf ? 'image/*' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -477,7 +507,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}
