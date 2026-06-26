@@ -220,7 +220,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       if (allRendered) {
         // Use the images-to-pdf processor to wrap the page images in a PDF
         actualProcessor = 'images-to-pdf'
-        runOptions = { ...options, output: 'single', pageSize: 'fit' }
+        const outputName = orderedFiles.length === 1
+          ? orderedFiles[0].file.name.replace(/\.docx?$/i, '')
+          : 'word-converted'
+        runOptions = { ...options, output: 'single', pageSize: 'fit', outputName }
       } else {
         // Fallback: use the word-to-pdf processor with the raw DOCX
         actualProcessor = 'word-to-pdf'

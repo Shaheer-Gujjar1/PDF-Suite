@@ -250,6 +250,21 @@ processors['images-to-pdf'] = async function (inputs, opts, onProgress, log) {
 
   /* Single mode: all images → 1 PDF */
   if (output === 'single') {
+    /* Determine output filename from the first input's original name */
+    var outName = 'images.pdf';
+    if (inputs.length > 0 && inputs[0].fileName) {
+      /* If the input is a page image (e.g. "page-1.jpg"), use a generic name.
+         If it's an original file (e.g. "report.docx"), derive from it. */
+      var firstName = inputs[0].fileName;
+      if (firstName.indexOf('-page-') === -1 && firstName.indexOf('doc') > -1) {
+        outName = stripExt(firstName) + '.pdf';
+      } else if (opts && opts.outputName) {
+        outName = stripExt(opts.outputName) + '.pdf';
+      }
+    }
+    if (opts && opts.outputName) {
+      outName = stripExt(opts.outputName) + '.pdf';
+    }
     var doc = await lib.PDFDocument.create();
     for (var i = 0; i < inputs.length; i++) {
       log('Adding ' + inputs[i].fileName);
@@ -258,7 +273,7 @@ processors['images-to-pdf'] = async function (inputs, opts, onProgress, log) {
     }
     var bytes = await doc.save();
     onProgress(1);
-    return [{ name: 'images.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: inputs.length + ' image(s)' }];
+    return [{ name: outName, data: toArrayBuffer(bytes), mime: 'application/pdf', note: inputs.length + ' page(s)' }];
 
   /* Multiple mode: each image → 1 PDF */
   } else if (output === 'multiple') {

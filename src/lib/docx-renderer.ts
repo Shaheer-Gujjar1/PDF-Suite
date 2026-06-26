@@ -120,47 +120,66 @@ export async function renderDocxToPages(
     // Wait for images/fonts to load
     await new Promise((r) => setTimeout(r, 500))
 
-    // Get the rendered content height
-    const contentHeight = container.scrollHeight
     const iframeWin = iframe.contentWindow as any
-
-    // Use html2canvas from the iframe's context to avoid app CSS issues
     const iframeHtml2Canvas = iframeWin.html2canvas || html2canvas
-    const canvas = await iframeHtml2Canvas(container, {
-      scale: 2,
-      useCORS: true,
-      backgroundColor: '#ffffff',
-      width: PAGE_WIDTH,
-      height: contentHeight,
-      windowWidth: PAGE_WIDTH,
-    })
 
-    onProgress?.(0.7, 'Splitting into pages…')
-
-    // Split the tall canvas into A4-page-sized sections
+    // docx-preview with breakPages:true creates individual page wrapper divs.
+    // Capture each page div separately to avoid cutting text at boundaries.
+    const pageDivs = container.querySelectorAll('.docx-page-wrapper, .docx-page')
     const pages: RenderedPage[] = []
-    const contentWidth = canvas.width
-    const pageHeightInCanvas = Math.round(PAGE_HEIGHT * 2) // 2x scale
-    const totalPages = Math.ceil(canvas.height / pageHeightInCanvas)
 
-    for (let i = 0; i < totalPages; i++) {
-      const srcY = i * pageHeightInCanvas
-      const srcH = Math.min(pageHeightInCanvas, canvas.height - srcY)
-
-      const pageCanvas = document.createElement('canvas')
-      pageCanvas.width = contentWidth
-      pageCanvas.height = pageHeightInCanvas // Always A4 height (pad with white)
-
-      const ctx = pageCanvas.getContext('2d')!
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
-      ctx.drawImage(canvas, 0, srcY, contentWidth, srcH, 0, 0, contentWidth, srcH)
-
-      pages.push({
-        dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92),
+    if (pageDivs.length > 0) {
+      // Capture each page div individually
+      for (let i = 0; i < pageDivs.length; i++) {
+        const pageDiv = pageDivs[i] as HTMLElement
+        const pageCanvas = await iframeHtml2Canvas(pageDiv, {
+          scale: 2,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          width: pageDiv.offsetWidth || PAGE_WIDTH,
+          height: pageDiv.offsetHeight || PAGE_HEIGHT,
+          windowWidth: PAGE_WIDTH,
+        })
+        pages.push({
+          dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92),
+          width: pageDiv.offsetWidth || PAGE_WIDTH,
+          height: pageDiv.offsetHeight || PAGE_HEIGHT,
+        })
+        onProgress?.(0.5 + (0.5 * (i + 1) / pageDivs.length), 'Capturing page ' + (i + 1) + ' of ' + pageDivs.length)
+      }
+    } else {
+      // Fallback: capture the whole container and split into A4 pages
+      const contentHeight = container.scrollHeight
+      const canvas = await iframeHtml2Canvas(container, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff',
         width: PAGE_WIDTH,
-        height: PAGE_HEIGHT,
+        height: contentHeight,
+        windowWidth: PAGE_WIDTH,
       })
+
+      onProgress?.(0.7, 'Splitting into pages…')
+      const contentWidth = canvas.width
+      const pageHeightInCanvas = Math.round(PAGE_HEIGHT * 2)
+      const totalPages = Math.ceil(canvas.height / pageHeightInCanvas)
+
+      for (let i = 0; i < totalPages; i++) {
+        const srcY = i * pageHeightInCanvas
+        const srcH = Math.min(pageHeightInCanvas, canvas.height - srcY)
+        const pageCanvas = document.createElement('canvas')
+        pageCanvas.width = contentWidth
+        pageCanvas.height = pageHeightInCanvas
+        const ctx = pageCanvas.getContext('2d')!
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
+        ctx.drawImage(canvas, 0, srcY, contentWidth, srcH, 0, 0, contentWidth, srcH)
+        pages.push({
+          dataUrl: pageCanvas.toDataURL('image/jpeg', 0.92),
+          width: PAGE_WIDTH,
+          height: PAGE_HEIGHT,
+        })
+      }
     }
 
     onProgress?.(1, 'Done')
