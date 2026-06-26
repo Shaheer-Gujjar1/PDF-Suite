@@ -26,6 +26,7 @@ import { MergeView, type MergeFile } from '@/components/tools/merge-view'
 import { SplitView, type SplitConfig } from '@/components/tools/split-view'
 import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
 import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/images-to-pdf-view'
+import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -92,10 +93,14 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isSplit = tool.id === 'split'
   const isRotate = tool.id === 'rotate'
   const isImagesToPdf = tool.id === 'images-to-pdf'
+  const isPdfToImages = tool.id === 'pdf-to-images'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
     pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [],
+  })
+  const [pdfToImagesConfig, setPdfToImagesConfig] = React.useState<PdfToImagesConfig>({
+    mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2,
   })
 
   const processing = useProcessing()
@@ -116,6 +121,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setSplitConfig({ mode: 'each', ranges: '' })
     setRotateConfig({ angle: 90 })
     setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
+    setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
   }, [tool.id])
 
   // Sync mergeOrder when files change (add new files to the end)
@@ -194,6 +200,16 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         if (imagesConfig.output === 'single') {
           mode = 'single'
           singleLabel = 'Combined image PDF'
+        }
+      } else if (isPdfToImages) {
+        // PDF to Images uses the PdfToImageView config
+        runOptions = {
+          ...options,
+          mode: pdfToImagesConfig.mode,
+          format: pdfToImagesConfig.format,
+          scale: pdfToImagesConfig.scale,
+          selectedPages: pdfToImagesConfig.selectedPages,
+          selectedImages: pdfToImagesConfig.selectedImages.length > 0 ? pdfToImagesConfig.selectedImages : null,
         }
       } else if (isInteractive) {
         mode = 'single'
@@ -343,6 +359,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}
           />
+        ) : isPdfToImages && files.length > 0 ? (
+          <PdfToImageView
+            file={files[0].file}
+            config={pdfToImagesConfig}
+            onConfigChange={setPdfToImagesConfig}
+            onRemoveFile={() => setFiles([])}
+          />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
             toolId={tool.id}
@@ -376,7 +399,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}

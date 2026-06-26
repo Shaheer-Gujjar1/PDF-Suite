@@ -772,28 +772,108 @@ async function loadPdfJs() {
 }
 
 processors['pdf-to-images'] = async function (inputs, opts, onProgress, log) {
+  var mode = (opts && opts.mode) || 'pages';
   var format = (opts && opts.format) || 'png';
   var scale = (opts && Number(opts.scale)) || 2;
+  var selectedPages = (opts && opts.selectedPages) || null; /* array of 1-indexed page numbers */
+  var selectedImages = (opts && opts.selectedImages) || null; /* array of 0-indexed image indices */
   var pdfjs;
   try { pdfjs = await loadPdfJs(); }
   catch (e) { throw new Error('Could not load PDF rendering engine: ' + (e.message || e)); }
   var all = [];
+
   for (var fi = 0; fi < inputs.length; fi++) {
-    log('Rendering ' + inputs[fi].fileName);
-    var data = new Uint8Array(inputs[fi].data);
-    var doc = await pdfjs.getDocument({ data: data, useWorkerFetch: false, isEvalSupported: false }).promise;
+    var dataCopy = inputs[fi].data.slice(0);
+    var doc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
     var base = stripExt(inputs[fi].fileName);
-    for (var p = 1; p <= doc.numPages; p++) {
-      var page = await doc.getPage(p);
-      var viewport = page.getViewport({ scale: scale });
-      var canvas = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-      var ctx = canvas.getContext('2d');
-      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
-      var mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
-      var blob = await canvas.convertToBlob({ type: mime, quality: format === 'jpg' ? 0.85 : undefined });
-      var arr = new Uint8Array(await blob.arrayBuffer());
-      all.push({ name: base + '-page-' + p + '.' + (format === 'jpg' ? 'jpg' : 'png'), data: toArrayBuffer(arr), mime: mime });
-      onProgress((fi + (p / doc.numPages)) / inputs.length);
+
+    if (mode === 'extract') {
+      /* Extract embedded images from the PDF */
+      log('Extracting embedded images from ' + inputs[fi].fileName);
+      var imgIdx = 0;
+      var selectedSet = {};
+      if (selectedImages) { for (var si = 0; si < selectedImages.length; si++) selectedSet[selectedImages[si]] = true; }
+
+      for (var p = 1; p <= doc.numPages; p++) {
+        var page = await doc.getPage(p);
+        var ops = await page.getOperatorList();
+        var PDFJS_OPS = pdfjs.OPS;
+
+        for (var oi = 0; oi < ops.fnArray.length; oi++) {
+          var fn = ops.fnArray[oi];
+          if (fn === PDFJS_OPS.paintImageXObject || fn === PDFJS_OPS.paintInlineImageRuntimeObject) {
+            var shouldExtract = !selectedImages || selectedSet[imgIdx];
+            if (shouldExtract) {
+              var args = ops.argsArray[oi];
+              var imgName = args[0];
+              try {
+                var imgObj;
+                if (typeof imgName === 'string') {
+                  imgObj = await new Promise(function (resolve) { page.objs.get(imgName, resolve); });
+                }
+                if (imgObj) {
+                  var canvas, ctx;
+                  if (imgObj.bitmap) {
+                    canvas = new OffscreenCanvas(imgObj.bitmap.width, imgObj.bitmap.height);
+                    ctx = canvas.getContext('2d');
+                    ctx.drawImage(imgObj.bitmap, 0, 0);
+                  } else if (imgObj.data && imgObj.width) {
+                    canvas = new OffscreenCanvas(imgObj.width, imgObj.height);
+                    ctx = canvas.getContext('2d');
+                    var imgData = ctx.createImageData(imgObj.width, imgObj.height);
+                    if (imgObj.data.length === imgObj.width * imgObj.height * 3) {
+                      for (var d = 0; d < imgObj.data.length; d += 3) {
+                        imgData.data[d] = imgObj.data[d];
+                        imgData.data[d + 1] = imgObj.data[d + 1];
+                        imgData.data[d + 2] = imgObj.data[d + 2];
+                        imgData.data[d + 3] = 255;
+                      }
+                    } else {
+                      imgData.data.set(imgObj.data);
+                    }
+                    ctx.putImageData(imgData, 0, 0);
+                  }
+                  if (canvas) {
+                    var mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
+                    var blob = await canvas.convertToBlob({ type: mime, quality: format === 'jpg' ? 0.85 : undefined });
+                    var arr = new Uint8Array(await blob.arrayBuffer());
+                    all.push({ name: base + '-image-' + (imgIdx + 1) + '.' + (format === 'jpg' ? 'jpg' : 'png'), data: toArrayBuffer(arr), mime: mime });
+                  }
+                }
+              } catch (_) {}
+            }
+            imgIdx++;
+          }
+        }
+        try { await page.cleanup(); } catch (_) {}
+        onProgress((fi + (p / doc.numPages)) / inputs.length);
+      }
+    } else {
+      /* Convert pages to images */
+      log('Rendering pages from ' + inputs[fi].fileName);
+      var pagesToRender = selectedPages || [];
+      if (pagesToRender.length === 0) {
+        for (var pp = 1; pp <= doc.numPages; pp++) pagesToRender.push(pp);
+      }
+      var totalPages = pagesToRender.length;
+
+      for (var pi = 0; pi < totalPages; pi++) {
+        var pageNum = pagesToRender[pi];
+        var page = await doc.getPage(pageNum);
+        var viewport = page.getViewport({ scale: scale });
+        var canvas = new OffscreenCanvas(Math.max(1, Math.ceil(viewport.width)), Math.max(1, Math.ceil(viewport.height)));
+        var ctx = canvas.getContext('2d');
+        if (!ctx) continue;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+        var mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
+        var jpgBlob = await canvas.convertToBlob({ type: mime, quality: format === 'jpg' ? 0.85 : undefined });
+        var jpgArr = new Uint8Array(await jpgBlob.arrayBuffer());
+        all.push({ name: base + '-page-' + pageNum + '.' + (format === 'jpg' ? 'jpg' : 'png'), data: toArrayBuffer(jpgArr), mime: mime });
+        try { await page.cleanup(); } catch (_) {}
+        onProgress((fi + ((pi + 1) / totalPages)) / inputs.length);
+      }
     }
     try { await doc.destroy(); } catch (_) {}
   }
