@@ -162,6 +162,7 @@ export const tools: Tool[] = [
     accent: "rose",
     batch: false,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   // ---------- Optimize ----------

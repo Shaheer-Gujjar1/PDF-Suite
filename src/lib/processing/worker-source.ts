@@ -432,24 +432,96 @@ processors['compress'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/* ---- Repair PDF (tolerant load + clean re-save) ------------------------- */
+/* ---- Repair PDF (multi-strategy recovery) ------------------------------ */
+/* Strategy 1: Try pdf-lib with tolerant options (fixes xref issues, bad objects).
+   Strategy 2: If no PDF header, search for it in the file and slice.
+   Strategy 3: Try pdf.js (more tolerant parser) → re-save with pdf-lib.
+   Strategy 4: If all fail, report a clear error. */
 processors['repair'] = async function (inputs, _opts, onProgress, log) {
   var lib = getPDFLib();
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Repairing ' + inputs[i].fileName);
-    var doc;
+    var origData = inputs[i].data;
+    var doc = null;
+    var strategy = '';
+
+    /* Strategy 1: pdf-lib tolerant load */
     try {
-      doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true, throwOnInvalidObject: false });
-    } catch (e) {
-      throw new Error('Could not repair ' + inputs[i].fileName + ': ' + (e && e.message ? e.message : String(e)));
+      doc = await lib.PDFDocument.load(origData, { ignoreEncryption: true, throwOnInvalidObject: false });
+      strategy = 'structural rebuild';
+    } catch (e1) {
+      var msg1 = (e1 && e1.message) ? e1.message : String(e1);
+      log('Strategy 1 failed: ' + msg1);
+
+      /* Strategy 2: Find PDF header if missing/truncated */
+      if (msg1.indexOf('No PDF header') > -1 || msg1.indexOf('header') > -1) {
+        try {
+          var bytes = new Uint8Array(origData);
+          var headerIdx = -1;
+          /* Search for %PDF- in first 10KB of file */
+          for (var j = 0; j < Math.min(bytes.length, 10240) - 4; j++) {
+            if (bytes[j] === 0x25 && bytes[j+1] === 0x50 && bytes[j+2] === 0x44 && bytes[j+3] === 0x46) {
+              headerIdx = j;
+              break;
+            }
+          }
+          if (headerIdx > 0) {
+            log('Found PDF header at offset ' + headerIdx + ' — truncating prefix');
+            var sliced = origData.slice(headerIdx);
+            doc = await lib.PDFDocument.load(sliced, { ignoreEncryption: true, throwOnInvalidObject: false });
+            strategy = 'header recovery';
+          }
+        } catch (e2) {
+          log('Strategy 2 failed: ' + ((e2 && e2.message) ? e2.message : String(e2)));
+        }
+      }
+
+      /* Strategy 3: Try pdf.js (more tolerant) → re-save */
+      if (!doc) {
+        try {
+          log('Trying pdf.js parser…');
+          var pdfjs = await loadPdfJs();
+          var dataCopy = origData.slice(0);
+          var jsDoc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useSystemFonts: true, isEvalSupported: false, disableFontFace: true }).promise;
+          var pageCount = jsDoc.numPages;
+          var newDoc = await lib.PDFDocument.create();
+          for (var p = 1; p <= pageCount; p++) {
+            var page = await jsDoc.getPage(p);
+            var viewport = page.getViewport({ scale: 1.0 });
+            var canvas = new OffscreenCanvas(Math.max(1, Math.ceil(viewport.width)), Math.max(1, Math.ceil(viewport.height)));
+            var ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              try { await page.render({ canvasContext: ctx, viewport: viewport }).promise; } catch (_) {}
+              var pngBlob = await canvas.convertToBlob({ type: 'image/png' });
+              var pngArr = new Uint8Array(await pngBlob.arrayBuffer());
+              var img = await newDoc.embedPng(pngArr);
+              var newPage = newDoc.addPage([viewport.width, viewport.height]);
+              newPage.drawImage(img, { x: 0, y: 0, width: viewport.width, height: viewport.height });
+            }
+            try { await page.cleanup(); } catch (_) {}
+          }
+          try { await jsDoc.destroy(); } catch (_) {}
+          doc = newDoc;
+          strategy = 'rasterized recovery (text not selectable)';
+        } catch (e3) {
+          log('Strategy 3 failed: ' + ((e3 && e3.message) ? e3.message : String(e3)));
+        }
+      }
     }
-    var bytes = await doc.save({ useObjectStreams: true });
+
+    if (!doc) {
+      throw new Error('Could not repair ' + inputs[i].fileName + '. The file is too severely corrupted — no valid PDF structure could be recovered.');
+    }
+
+    var bytes2 = await doc.save({ useObjectStreams: true });
     out.push({
       name: stripExt(inputs[i].fileName) + '-repaired.pdf',
-      data: toArrayBuffer(bytes),
+      data: toArrayBuffer(bytes2),
       mime: 'application/pdf',
-      note: doc.getPageCount() + ' pages recovered'
+      note: doc.getPageCount() + ' pages recovered · ' + strategy
     });
     onProgress((i + 1) / inputs.length);
   }
