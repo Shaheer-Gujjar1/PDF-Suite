@@ -159,17 +159,46 @@ function renderSheetToCanvas(ws: any, XLSX: any, sheetName: string): HTMLCanvasE
       let italic = false
       let fontSize = 11
       let align = 'left'
+      let valign = 'middle'
+      let wrapText = false
 
       if (cell) {
         const font = cell.s?.font || {}
         bold = !!font.bold
         italic = !!font.italic
         if (font.sz) fontSize = font.sz
+        // Font color — handle rgb, theme, and indexed
         if (font.color?.rgb) { const rgb = argbToRgb(font.color.rgb); if (rgb) fontColor = `rgb(${rgb.r},${rgb.g},${rgb.b})` }
+        else if (font.color?.theme === 1) fontColor = '#000000'
+        else if (font.color?.theme === 0) fontColor = '#ffffff'
+
+        // Fill — handle patternType, fgColor, bgColor
         const fill = cell.s?.fill
-        if (fill?.fgColor?.rgb && fill.fgColor.rgb !== '00000000') { const rgb = argbToRgb(fill.fgColor.rgb); if (rgb) bgColor = `rgb(${rgb.r},${rgb.g},${rgb.b})` }
+        if (fill) {
+          // Solid fill uses fgColor
+          if (fill.patternType === 'solid' || !fill.patternType) {
+            if (fill.fgColor?.rgb && fill.fgColor.rgb !== '00000000' && fill.fgColor.rgb !== 'FFFFFFFF') {
+              const rgb = argbToRgb(fill.fgColor.rgb); if (rgb) bgColor = `rgb(${rgb.r},${rgb.g},${rgb.b})`
+            }
+            // Theme-based fills
+            else if (fill.fgColor?.theme !== undefined) {
+              const themeColors = ['#ffffff', '#000000', '#e7e6e6', '#44546a', '#5b9bd5', '#ed7d31', '#a5a5a5', '#ffc000', '#4472c4', '#70ad47']
+              if (fill.fgColor.theme < themeColors.length) bgColor = themeColors[fill.fgColor.theme]
+            }
+          }
+        }
+
+        // Alignment
         const alignment = cell.s?.alignment || {}
         if (alignment.horizontal) align = alignment.horizontal
+        if (alignment.vertical) valign = alignment.vertical
+        if (alignment.wrapText) wrapText = true
+      }
+
+      // Smart alignment: numbers default to right, text to left, booleans to center
+      if (cell && !cell.s?.alignment?.horizontal) {
+        if (cell.t === 'n') align = 'right'
+        else if (cell.t === 'b') align = 'center'
       }
 
       // Background
@@ -179,18 +208,36 @@ function renderSheetToCanvas(ws: any, XLSX: any, sheetName: string): HTMLCanvasE
       // Borders (default thin gray on all sides)
       ctx.strokeStyle = '#d0d0d0'
       ctx.lineWidth = 1
-      ctx.strokeRect(x, y, w, h)
+      ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
 
-      // Override borders
+      // Override borders with styled borders
       if (cell) {
         const border = cell.s?.border || {}
-        if (border.top?.style) { ctx.strokeStyle = border.top.color?.rgb ? (argbToRgb(border.top.color.rgb) ? `rgb(${argbToRgb(border.top.color.rgb)!.r},${argbToRgb(border.top.color.rgb)!.g},${argbToRgb(border.top.color.rgb)!.b})` : '#000') : '#000'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + w, y); ctx.stroke() }
-        if (border.bottom?.style) { ctx.strokeStyle = border.bottom.color?.rgb ? (argbToRgb(border.bottom.color.rgb) ? `rgb(${argbToRgb(border.bottom.color.rgb)!.r},${argbToRgb(border.bottom.color.rgb)!.g},${argbToRgb(border.bottom.color.rgb)!.b})` : '#000') : '#000'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h); ctx.stroke() }
-        if (border.left?.style) { ctx.strokeStyle = border.left.color?.rgb ? (argbToRgb(border.left.color.rgb) ? `rgb(${argbToRgb(border.left.color.rgb)!.r},${argbToRgb(border.left.color.rgb)!.g},${argbToRgb(border.left.color.rgb)!.b})` : '#000') : '#000'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + h); ctx.stroke() }
-        if (border.right?.style) { ctx.strokeStyle = border.right.color?.rgb ? (argbToRgb(border.right.color.rgb) ? `rgb(${argbToRgb(border.right.color.rgb)!.r},${argbToRgb(border.right.color.rgb)!.g},${argbToRgb(border.right.color.rgb)!.b})` : '#000') : '#000'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x + w, y); ctx.lineTo(x + w, y + h); ctx.stroke() }
+        const getBorderColor = (b: any) => {
+          if (!b) return null
+          if (b.color?.rgb) { const rgb = argbToRgb(b.color.rgb); return rgb ? `rgb(${rgb.r},${rgb.g},${rgb.b})` : '#000000' }
+          return '#000000'
+        }
+        const drawBorder = (side: string, b: any) => {
+          if (!b || !b.style) return
+          const color = getBorderColor(b) || '#000000'
+          const width = b.style === 'medium' ? 2 : b.style === 'thick' ? 3 : 1
+          ctx.strokeStyle = color
+          ctx.lineWidth = width
+          ctx.beginPath()
+          if (side === 'top') { ctx.moveTo(x, y); ctx.lineTo(x + w, y) }
+          else if (side === 'bottom') { ctx.moveTo(x, y + h); ctx.lineTo(x + w, y + h) }
+          else if (side === 'left') { ctx.moveTo(x, y); ctx.lineTo(x, y + h) }
+          else if (side === 'right') { ctx.moveTo(x + w, y); ctx.lineTo(x + w, y + h) }
+          ctx.stroke()
+        }
+        drawBorder('top', border.top)
+        drawBorder('bottom', border.bottom)
+        drawBorder('left', border.left)
+        drawBorder('right', border.right)
       }
 
-      // Text
+      // Text rendering with wrapping
       let text = ''
       if (cell) {
         if (cell.w !== undefined && cell.w !== null) text = String(cell.w)
@@ -199,18 +246,87 @@ function renderSheetToCanvas(ws: any, XLSX: any, sheetName: string): HTMLCanvasE
       if (text) {
         ctx.font = `${bold ? 'bold ' : ''}${italic ? 'italic ' : ''}${fontSize}px Arial, sans-serif`
         ctx.fillStyle = fontColor
-        ctx.textBaseline = 'middle'
-        let textX = x + 5
-        if (align === 'center') { ctx.textAlign = 'center'; textX = x + w / 2 }
-        else if (align === 'right') { ctx.textAlign = 'right'; textX = x + w - 5 }
-        else { ctx.textAlign = 'left' }
-        // Clip to cell
-        ctx.save()
-        ctx.beginPath()
-        ctx.rect(x + 2, y + 1, w - 4, h - 2)
-        ctx.clip()
-        ctx.fillText(text, textX, y + h / 2)
-        ctx.restore()
+
+        const padding = 5
+        const maxTextWidth = w - padding * 2
+
+        // Check if text needs wrapping
+        const measuredWidth = ctx.measureText(text).width
+        const needsWrap = wrapText && measuredWidth > maxTextWidth
+
+        if (needsWrap) {
+          // Word-wrap the text
+          const words = text.split(' ')
+          const lines: string[] = []
+          let currentLine = ''
+          for (const word of words) {
+            const testLine = currentLine ? currentLine + ' ' + word : word
+            if (ctx.measureText(testLine).width > maxTextWidth && currentLine) {
+              lines.push(currentLine)
+              currentLine = word
+            } else {
+              currentLine = testLine
+            }
+          }
+          if (currentLine) lines.push(currentLine)
+
+          // If any single word is wider than the cell, character-wrap it
+          for (let li = 0; li < lines.length; li++) {
+            while (ctx.measureText(lines[li]).width > maxTextWidth && lines[li].length > 1) {
+              let cutPos = lines[li].length - 1
+              while (cutPos > 1 && ctx.measureText(lines[li].slice(0, cutPos)).width > maxTextWidth) cutPos--
+              const remaining = lines[li].slice(cutPos)
+              lines[li] = lines[li].slice(0, cutPos)
+              lines.splice(li + 1, 0, remaining)
+              li++
+            }
+          }
+
+          const lineHeight = fontSize * 1.3
+          const totalTextHeight = lines.length * lineHeight
+          let startY: number
+
+          // Vertical alignment
+          if (valign === 'top') startY = y + padding
+          else if (valign === 'bottom') startY = y + h - padding - totalTextHeight + lineHeight
+          else startY = y + (h - totalTextHeight) / 2 + lineHeight / 2
+
+          // Clip to cell
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(x + 1, y + 1, w - 2, h - 2)
+          ctx.clip()
+
+          ctx.textBaseline = 'middle'
+          for (let li = 0; li < lines.length; li++) {
+            let textX = x + padding
+            if (align === 'center') { ctx.textAlign = 'center'; textX = x + w / 2 }
+            else if (align === 'right') { ctx.textAlign = 'right'; textX = x + w - padding }
+            else { ctx.textAlign = 'left' }
+            ctx.fillText(lines[li], textX, startY + li * lineHeight)
+          }
+          ctx.restore()
+        } else {
+          // Single line — no wrapping needed
+          ctx.textBaseline = 'middle'
+          let textX = x + padding
+          if (align === 'center') { ctx.textAlign = 'center'; textX = x + w / 2 }
+          else if (align === 'right') { ctx.textAlign = 'right'; textX = x + w - padding }
+          else { ctx.textAlign = 'left' }
+
+          // Vertical alignment
+          let textY = y + h / 2 // default: middle
+          if (valign === 'top') textY = y + fontSize * 0.7 + 2
+          else if (valign === 'bottom') textY = y + h - fontSize * 0.5 - 2
+
+          // Clip to cell
+          ctx.save()
+          ctx.beginPath()
+          ctx.rect(x + 1, y + 1, w - 2, h - 2)
+          ctx.clip()
+          ctx.fillText(text, textX, textY)
+          ctx.restore()
+        }
       }
     }
   }
