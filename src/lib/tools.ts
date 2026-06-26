@@ -151,6 +151,7 @@ export const tools: Tool[] = [
     accent: "rose",
     batch: true,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "crop",

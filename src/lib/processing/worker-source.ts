@@ -915,24 +915,35 @@ processors['organize'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/* ---- Crop PDF (apply crop boxes) --------------------------------------- */
-/* options.crop = { x, y, width, height } in PDF points (origin bottom-left) */
+/* ---- Crop PDF (apply crop boxes — all-pages or per-page) --------------- */
+/* options.mode = 'all' | 'current'
+   options.crop = { x, y, width, height } (all-pages mode, PDF points)
+   options.pageCrops = { 0: {x,y,w,h}, 2: {...} } (current-page mode, keyed by page index) */
 processors['crop'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
-  var crop = opts && opts.crop;
+  var mode = (opts && opts.mode) || 'all';
+  var allCrop = opts && opts.crop;
+  var pageCrops = (opts && opts.pageCrops) || {};
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Cropping ' + inputs[i].fileName);
     var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
     var pages = doc.getPages();
+    var appliedCount = 0;
     for (var p = 0; p < pages.length; p++) {
+      var crop = mode === 'all' ? allCrop : pageCrops[p];
       if (crop) {
         pages[p].setCropBox(crop.x, crop.y, crop.width, crop.height);
         pages[p].setMediaBox(crop.x, crop.y, crop.width, crop.height);
+        appliedCount++;
       }
     }
     var bytes = await doc.save({ useObjectStreams: true });
-    out.push({ name: stripExt(inputs[i].fileName) + '-cropped.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: crop ? (Math.round(crop.width) + 'x' + Math.round(crop.height) + 'pt') : 'no change' });
+    var note;
+    if (appliedCount === 0) note = 'no change';
+    else if (mode === 'all') note = Math.round(allCrop.width) + 'x' + Math.round(allCrop.height) + 'pt on all pages';
+    else note = appliedCount + ' page(s) cropped';
+    out.push({ name: stripExt(inputs[i].fileName) + '-cropped.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: note });
     onProgress((i + 1) / inputs.length);
   }
   onProgress(1);

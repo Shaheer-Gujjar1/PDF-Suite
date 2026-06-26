@@ -480,7 +480,7 @@ function InteractiveEditor({
   onRemoveFile?: () => void
 }) {
   if (toolId === 'organize') return <OrganizePdfView file={file} onResultChange={onResultChange} onRemoveFile={onRemoveFile} />
-  if (toolId === 'crop') return <CropPdfView file={file} onResultChange={onResultChange} />
+  if (toolId === 'crop') return <CropPdfView file={file} onResultChange={onResultChange} onRemoveFile={onRemoveFile} />
   if (toolId === 'sign-annotate') return <SignAnnotateView file={file} onResultChange={onResultChange} />
   if (toolId === 'edit-text') return <EditTextView file={file} onResultChange={onResultChange} />
   return null
