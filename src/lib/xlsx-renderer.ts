@@ -3,10 +3,9 @@
 /**
  * Main-thread XLSX → page images renderer.
  *
- * Uses SheetJS to parse the spreadsheet, then renders it as a styled HTML
- * table in an isolated iframe (preserving cell colors, merges, borders,
- * fonts, alignment). Captures with html2canvas and splits into A4 pages
- * at safe break points (between rows).
+ * Uses SheetJS to parse the spreadsheet, renders it as a styled HTML table
+ * in a hidden div (all inline styles — no oklch), captures with html2canvas,
+ * and splits into A4 pages at safe break points.
  */
 
 const XLSX_URL = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'
@@ -51,10 +50,10 @@ export interface RenderProgress {
   (progress: number, message: string): void
 }
 
-/** Convert ARGB hex to CSS rgba */
-function argbToRgba(hex: string): string {
-  if (!hex || hex === '00000000') return ''
-  const h = hex.replace(/^FF/, '') // Remove alpha prefix if present
+/** Convert ARGB hex to CSS rgb */
+function argbToRgb(hex: string): string {
+  if (!hex || hex === '00000000' || hex === 'FFFFFFFF') return ''
+  const h = hex.replace(/^FF/, '')
   if (h.length === 6) {
     const r = parseInt(h.slice(0, 2), 16)
     const g = parseInt(h.slice(2, 4), 16)
@@ -64,23 +63,33 @@ function argbToRgba(hex: string): string {
   return ''
 }
 
-/** Build HTML table from a worksheet, preserving styling */
+/** Convert column number to letter (0 → A, 1 → B, etc.) */
+function colToLetter(col: number): string {
+  let result = ''
+  col++
+  while (col > 0) {
+    const rem = (col - 1) % 26
+    result = String.fromCharCode(65 + rem) + result
+    col = Math.floor((col - 1) / 26)
+  }
+  return result
+}
+
+/** Build HTML table from a worksheet with styling */
 function sheetToHtml(ws: any, XLSX: any): string {
   const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
   const merges = ws['!merges'] || []
   const cols = ws['!cols'] || []
   const rows = ws['!rows'] || []
 
-  // Build a merge lookup: "r,c" → { rowspan, colspan }
+  // Build merge lookup
   const mergeMap: Record<string, { rowspan: number; colspan: number; hidden: boolean }> = {}
   for (const m of merges) {
-    const key = `${m.s.r},${m.s.c}`
-    mergeMap[key] = {
+    mergeMap[`${m.s.r},${m.s.c}`] = {
       rowspan: m.e.r - m.s.r + 1,
       colspan: m.e.c - m.s.c + 1,
       hidden: false,
     }
-    // Mark cells hidden by this merge
     for (let r = m.s.r; r <= m.e.r; r++) {
       for (let c = m.s.c; c <= m.e.c; c++) {
         if (r !== m.s.r || c !== m.s.c) {
@@ -90,7 +99,7 @@ function sheetToHtml(ws: any, XLSX: any): string {
     }
   }
 
-  let html = '<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Calibri,Arial,sans-serif;font-size:11pt;">\n'
+  let html = '<table style="border-collapse:collapse;font-family:Arial,sans-serif;font-size:11px;width:100%;">\n'
 
   // Column widths
   for (let c = range.s.c; c <= range.e.c; c++) {
@@ -101,7 +110,7 @@ function sheetToHtml(ws: any, XLSX: any): string {
 
   for (let r = range.s.r; r <= range.e.r; r++) {
     const row = rows[r]
-    const rowHeight = row && row.hpt ? row.hpt : 18
+    const rowHeight = row && row.hpt ? row.hpt : 20
     html += `<tr style="height:${rowHeight}pt;">`
 
     for (let c = range.s.c; c <= range.e.c; c++) {
@@ -109,72 +118,74 @@ function sheetToHtml(ws: any, XLSX: any): string {
       const cell = ws[cellAddr]
       const merge = mergeMap[`${r},${c}`]
 
-      if (merge && merge.hidden) {
-        continue // Skip cells hidden by merge
-      }
+      if (merge && merge.hidden) continue
 
       const rowspan = merge ? merge.rowspan : 1
       const colspan = merge ? merge.colspan : 1
-      const attrs = []
+      const attrs: string[] = []
       if (rowspan > 1) attrs.push(`rowspan="${rowspan}"`)
       if (colspan > 1) attrs.push(`colspan="${colspan}"`)
 
-      // Cell styling
-      const styles: string[] = ['border:1px solid #d0d0d0', 'padding:3px 5px', 'vertical-align:middle']
-      let content = ''
+      // Cell styling — all inline, no oklch/lab
+      const styles: string[] = [
+        'border:1px solid #b0b0b0',
+        'padding:4px 6px',
+        'vertical-align:middle',
+        'background:#ffffff',
+        'color:#000000',
+      ]
+      let content = '&nbsp;'
 
       if (cell) {
-        // Font style
+        // Font style (cell.s may be undefined in community edition — use defaults)
         const font = cell.s?.font || {}
         if (font.bold) styles.push('font-weight:bold')
         if (font.italic) styles.push('font-style:italic')
         if (font.underline) styles.push('text-decoration:underline')
         if (font.sz) styles.push(`font-size:${font.sz}pt`)
-        if (font.color?.rgb) styles.push(`color:${argbToRgba(font.color.rgb)}`)
-        else if (font.color?.theme === 1) styles.push('color:#000000')
+        if (font.color?.rgb) {
+          const c = argbToRgb(font.color.rgb)
+          if (c) styles.push(`color:${c}`)
+        }
 
         // Fill
         const fill = cell.s?.fill
         if (fill?.fgColor?.rgb && fill.fgColor.rgb !== '00000000') {
-          styles.push(`background:${argbToRgba(fill.fgColor.rgb)}`)
+          const bg = argbToRgb(fill.fgColor.rgb)
+          if (bg) styles.push(`background:${bg}`)
         }
 
         // Alignment
         const align = cell.s?.alignment || {}
         if (align.horizontal) styles.push(`text-align:${align.horizontal}`)
-        if (align.vertical) styles.push(`vertical-align:${align.vertical}`)
         if (align.wrapText) styles.push('white-space:normal')
 
         // Border
         const border = cell.s?.border || {}
-        const borderStyles: string[] = []
-        for (const [side, key] of [['top', 'top'], ['bottom', 'bottom'], ['left', 'left'], ['right', 'right']] as [string, string][]) {
-          const b = border[key]
-          if (b && b.style) {
-            const bw = b.style === 'thin' ? '1px' : b.style === 'medium' ? '2px' : '1px'
-            const bc = b.color?.rgb ? argbToRgba(b.color.rgb) : '#000000'
-            borderStyles.push(`border-${side}:${bw} solid ${bc}`)
-          }
-        }
-        if (borderStyles.length) {
-          // Replace default border with specific borders
+        if (border.top?.style || border.bottom?.style || border.left?.style || border.right?.style) {
           const idx = styles.findIndex(s => s.startsWith('border:'))
           if (idx >= 0) styles.splice(idx, 1)
-          styles.push(...borderStyles)
+          for (const [side, key] of [['top', 'top'], ['bottom', 'bottom'], ['left', 'left'], ['right', 'right']] as [string, string][]) {
+            const b = border[key]
+            if (b && b.style) {
+              const bw = b.style === 'thin' ? '1px' : '2px'
+              const bc = b.color?.rgb ? argbToRgb(b.color.rgb) || '#000000' : '#000000'
+              styles.push(`border-${side}:${bw} solid ${bc}`)
+            } else {
+              styles.push(`border-${side}:1px solid #b0b0b0`)
+            }
+          }
         }
 
-        // Content
-        if (cell.v !== undefined && cell.v !== null) {
-          if (cell.f && cell.t === 'n' && cell.w) {
-            content = String(cell.w) // Formatted number
-          } else if (cell.t === 'd' && cell.w) {
-            content = String(cell.w)
-          } else {
-            content = String(cell.v)
-          }
-          // Escape HTML
-          content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        // Content — use cell.w (formatted) if available, else cell.v
+        if (cell.w !== undefined && cell.w !== null) {
+          content = String(cell.w)
+        } else if (cell.v !== undefined && cell.v !== null) {
+          content = String(cell.v)
         }
+        // Escape HTML
+        content = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        if (!content) content = '&nbsp;'
       }
 
       html += `<td${attrs.length ? ' ' + attrs.join(' ') : ''} style="${styles.join(';')}">${content}</td>`
@@ -220,7 +231,8 @@ export async function renderXlsxToPages(
 
   onProgress?.(0.2, 'Parsing spreadsheet…')
   const arrayBuffer = await file.arrayBuffer()
-  const wb = XLSX.read(arrayBuffer, { type: 'array', cellStyles: true, cellDates: true })
+  // cellStyles: true to read style info (works with xlsx.full.min.js)
+  const wb = XLSX.read(arrayBuffer, { type: 'array', cellStyles: true, cellDates: true, cellNF: true })
 
   // Build HTML for all sheets
   let sheetsHtml = ''
@@ -228,9 +240,13 @@ export async function renderXlsxToPages(
     const sheetName = wb.SheetNames[i]
     const ws = wb.Sheets[sheetName]
     if (!ws['!ref']) continue
-    sheetsHtml += `<h2 style="font-family:Calibri,Arial,sans-serif;font-size:14pt;font-weight:bold;margin:20px 0 8px 0;color:#2F5496;">${sheetName}</h2>\n`
+    sheetsHtml += `<div style="font-family:Arial,sans-serif;font-size:16px;font-weight:bold;margin:16px 0 8px 0;color:#2F5496;padding:4px 0;border-bottom:2px solid #2F5496;">${sheetName}</div>\n`
     sheetsHtml += sheetToHtml(ws, XLSX)
-    sheetsHtml += '<div style="height:30px;"></div>\n' // Gap between sheets
+    sheetsHtml += '<div style="height:24px;"></div>\n'
+  }
+
+  if (!sheetsHtml) {
+    throw new Error('No sheets found in the spreadsheet')
   }
 
   // A4 dimensions
@@ -239,7 +255,8 @@ export async function renderXlsxToPages(
   const SCALE = 2
   const PAGE_HEIGHT_SCALED = PAGE_HEIGHT * SCALE
 
-  // Create isolated iframe
+  // Use an isolated iframe to avoid the app's oklch/lab CSS colors that
+  // html2canvas can't parse. The iframe only contains our inline-styled table.
   const iframe = document.createElement('iframe')
   iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${PAGE_WIDTH}px;height:${PAGE_HEIGHT * 2}px;border:none;`
   document.body.appendChild(iframe)
@@ -251,23 +268,24 @@ export async function renderXlsxToPages(
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body { background: #fff; padding: 40px; }
-      #xlsx-container { width: ${PAGE_WIDTH - 80}px; background: #fff; }
-      table { width: 100%; table-layout: auto; }
     </style>
-  </head><body><div id="xlsx-container">${sheetsHtml}</div></body></html>`)
+  </head><body><div id="xlsx-content">${sheetsHtml}</div></body></html>`)
   iframeDoc.close()
 
-  const container = iframeDoc.getElementById('xlsx-container')!
+  const inner = iframeDoc.getElementById('xlsx-content')!
 
   try {
     onProgress?.(0.5, 'Capturing spreadsheet…')
+    // Wait for layout and fonts
     await new Promise((r) => setTimeout(r, 300))
 
+    const contentHeight = inner.scrollHeight
+
+    // Call html2canvas from the iframe's window so it clones the iframe's
+    // document (which has no oklch colors), not the main app's document
     const iframeWin = iframe.contentWindow as any
     const iframeHtml2Canvas = iframeWin.html2canvas || html2canvas
-
-    const contentHeight = container.scrollHeight
-    const canvas = await iframeHtml2Canvas(container, {
+    const canvas = await iframeHtml2Canvas(inner, {
       scale: SCALE,
       useCORS: true,
       backgroundColor: '#ffffff',
@@ -293,7 +311,7 @@ export async function renderXlsxToPages(
         const remainingHeight = totalHeight - currentY
         const pageCanvas = document.createElement('canvas')
         pageCanvas.width = canvasWidth
-        pageCanvas.height = remainingHeight
+        pageCanvas.height = Math.max(1, remainingHeight)
         const pageCtx = pageCanvas.getContext('2d')!
         pageCtx.fillStyle = '#ffffff'
         pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
