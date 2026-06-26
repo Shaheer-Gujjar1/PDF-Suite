@@ -64,13 +64,50 @@ interface CellInfo {
 
 function parseSheet(ws: any, XLSX: any): { cells: CellInfo[][]; colWidths: number[]; rowHeights: number[]; name: string } | null {
   if (!ws['!ref']) return null
-  const range = XLSX.utils.decode_range(ws['!ref'])
+  const fullRange = XLSX.utils.decode_range(ws['!ref'])
   const merges = ws['!merges'] || []
   const cols = ws['!cols'] || []
   const rows = ws['!rows'] || []
 
+  // TRIM EMPTY ROWS/COLUMNS — find the actual used range by checking which
+  // rows/columns have any cell with actual VALUE content (not just styling).
+  // SheetJS !ref often includes thousands of empty rows that just have
+  // formatting applied, creating a massive blank canvas.
+  let maxR = -1
+  let maxC = -1
+  for (const key in ws) {
+    // Skip special keys like !ref, !merges, !cols, !rows
+    if (key[0] === '!') continue
+    const cell = ws[key]
+    if (cell && cell.v !== undefined && cell.v !== null && cell.v !== '') {
+      const addr = XLSX.utils.decode_cell(key)
+      if (addr.r > maxR) maxR = addr.r
+      if (addr.c > maxC) maxC = addr.c
+    }
+  }
+  // If nothing found, use a minimal range
+  if (maxR < 0) maxR = fullRange.s.r
+  if (maxC < 0) maxC = fullRange.s.c
+  // Also account for merges
+  for (const m of merges) {
+    if (m.e.r > maxR) maxR = m.e.r
+    if (m.e.c > maxC) maxC = m.e.c
+  }
+  // Hard caps to prevent insane canvas sizes
+  maxR = Math.min(maxR, fullRange.s.r + 499) // Max 500 rows
+  maxC = Math.min(maxC, fullRange.s.c + 29)  // Max 30 columns
+
+  const range = { s: { r: fullRange.s.r, c: fullRange.s.c }, e: { r: maxR, c: maxC } }
+  const numRows = maxR - fullRange.s.r + 1
+  const numCols = maxC - fullRange.s.c + 1
+  console.log(`[xlsx-renderer] Sheet range: ${XLSX.utils.encode_range(range)} (${numRows} rows × ${numCols} cols)`)
+  if (numRows > 200) {
+    console.warn(`[xlsx-renderer] Large sheet (${numRows} rows) — may take a moment`)
+  }
+
   const mergeMap: Record<string, { rs: number; cs: number; hidden: boolean }> = {}
   for (const m of merges) {
+    if (m.s.r > range.e.r || m.s.c > range.e.c) continue // Skip merges outside trimmed range
     mergeMap[`${m.s.r},${m.s.c}`] = { rs: m.e.r - m.s.r + 1, cs: m.e.c - m.s.c + 1, hidden: false }
     for (let r = m.s.r; r <= m.e.r; r++)
       for (let c = m.s.c; c <= m.e.c; c++)
@@ -294,65 +331,125 @@ export async function renderXlsxToPages(
   const canvasW = Math.max(maxW, PAGE_WIDTH) * SCALE
   const canvasH = totalH * SCALE
 
-  // Create master canvas
-  const master = document.createElement('canvas')
-  master.width = canvasW
-  master.height = canvasH
-  const ctx = master.getContext('2d')!
+  console.log(`[xlsx-renderer] Master canvas: ${canvasW}x${canvasH} (content: ${maxW}x${totalH}, pages: ~${Math.ceil(canvasH / (PAGE_HEIGHT * SCALE))})`)
 
-  // White background
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect(0, 0, canvasW, canvasH)
+  // Cap canvas height — browsers have a max canvas size (~32K pixels)
+  // If content is extremely tall, render in segments
+  const MAX_CANVAS_H = 16000 // 16K pixels — safe for all browsers
+  const needsSegmenting = canvasH > MAX_CANVAS_H
 
-  // Draw each sheet
-  let currentY = MARGIN
-  for (let i = 0; i < sheets.length; i++) {
-    const sheet = sheets[i]
-    const sheetTableWidth = sheet.colWidths.reduce((a, b) => a + b, 0)
-    const offsetX = Math.max(MARGIN, (PAGE_WIDTH - sheetTableWidth) / 2)
+  if (!needsSegmenting) {
+    // Single canvas approach (most common case)
+    const master = document.createElement('canvas')
+    master.width = canvasW
+    master.height = canvasH
+    const ctx = master.getContext('2d')!
 
-    // Scale for this drawing
-    ctx.save()
-    ctx.scale(SCALE, SCALE)
-    drawSheet(ctx, sheet, sheet.name, offsetX, currentY + TITLE_SPACE)
-    ctx.restore()
+    // White background
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, canvasW, canvasH)
 
-    const sheetHeight = sheet.rowHeights.reduce((a, b) => a + b, 0)
-    currentY += TITLE_SPACE + sheetHeight + SHEET_GAP + MARGIN
-    onProgress?.(0.5 + 0.3 * (i + 1) / sheets.length, 'Rendering sheet ' + (i + 1))
-    await new Promise(r => setTimeout(r, 0)) // Yield to UI
+    // Draw each sheet
+    let currentY = MARGIN
+    for (let i = 0; i < sheets.length; i++) {
+      const sheet = sheets[i]
+      const sheetTableWidth = sheet.colWidths.reduce((a, b) => a + b, 0)
+      const offsetX = Math.max(MARGIN, (PAGE_WIDTH - sheetTableWidth) / 2)
+
+      ctx.save()
+      ctx.scale(SCALE, SCALE)
+      drawSheet(ctx, sheet, sheet.name, offsetX, currentY + TITLE_SPACE)
+      ctx.restore()
+
+      const sheetHeight = sheet.rowHeights.reduce((a, b) => a + b, 0)
+      currentY += TITLE_SPACE + sheetHeight + SHEET_GAP + MARGIN
+      onProgress?.(0.5 + 0.3 * (i + 1) / sheets.length, 'Rendering sheet ' + (i + 1))
+      await new Promise(r => setTimeout(r, 0))
+    }
+
+    onProgress?.(0.8, 'Splitting into pages…')
+
+    // Split into A4 pages
+    const pageHScaled = PAGE_HEIGHT * SCALE
+    const pages: RenderedPage[] = []
+    let y = 0
+
+    while (y < canvasH) {
+      const remaining = canvasH - y
+      const ph = Math.min(pageHScaled, remaining)
+
+      const pc = document.createElement('canvas')
+      pc.width = canvasW
+      pc.height = ph
+      const pctx = pc.getContext('2d')!
+      pctx.fillStyle = '#ffffff'
+      pctx.fillRect(0, 0, pc.width, pc.height)
+      pctx.drawImage(master, 0, y, canvasW, ph, 0, 0, canvasW, ph)
+
+      pages.push({
+        dataUrl: pc.toDataURL('image/jpeg', 0.92),
+        width: canvasW / SCALE,
+        height: ph / SCALE,
+      })
+
+      y += ph
+      onProgress?.(0.8 + 0.2 * pages.length / Math.ceil(canvasH / pageHScaled), 'Page ' + pages.length)
+      await new Promise(r => setTimeout(r, 0))
+    }
+
+    console.log(`[xlsx-renderer] Generated ${pages.length} pages`)
+    onProgress?.(1, 'Done')
+    return pages
+  } else {
+    // Segmented approach for very tall content — render sheet by sheet,
+    // each to its own canvas, then split each into pages
+    console.log(`[xlsx-renderer] Using segmented rendering (content too tall: ${canvasH}px)`)
+    const pages: RenderedPage[] = []
+    const pageHScaled = PAGE_HEIGHT * SCALE
+
+    let currentY = 0
+    for (let i = 0; i < sheets.length; i++) {
+      const sheet = sheets[i]
+      const sheetTableWidth = sheet.colWidths.reduce((a, b) => a + b, 0)
+      const sheetHeight = sheet.rowHeights.reduce((a, b) => a + b, 0)
+      const segW = Math.max(sheetTableWidth + MARGIN * 2, PAGE_WIDTH) * SCALE
+      const segH = (sheetHeight + TITLE_SPACE + MARGIN * 2 + SHEET_GAP) * SCALE
+
+      const segCanvas = document.createElement('canvas')
+      segCanvas.width = segW
+      segCanvas.height = segH
+      const segCtx = segCanvas.getContext('2d')!
+      segCtx.fillStyle = '#ffffff'
+      segCtx.fillRect(0, 0, segW, segH)
+
+      const offsetX = Math.max(MARGIN, (PAGE_WIDTH - sheetTableWidth) / 2)
+      segCtx.save()
+      segCtx.scale(SCALE, SCALE)
+      drawSheet(segCtx, sheet, sheet.name, offsetX, MARGIN + TITLE_SPACE)
+      segCtx.restore()
+
+      // Split this segment into pages
+      let sy = 0
+      while (sy < segH) {
+        const ph = Math.min(pageHScaled, segH - sy)
+        const pc = document.createElement('canvas')
+        pc.width = segW
+        pc.height = ph
+        const pctx = pc.getContext('2d')!
+        pctx.fillStyle = '#ffffff'
+        pctx.fillRect(0, 0, pc.width, pc.height)
+        pctx.drawImage(segCanvas, 0, sy, segW, ph, 0, 0, segW, ph)
+        pages.push({ dataUrl: pc.toDataURL('image/jpeg', 0.92), width: segW / SCALE, height: ph / SCALE })
+        sy += ph
+      }
+
+      currentY += segH
+      onProgress?.(0.5 + 0.4 * (i + 1) / sheets.length, 'Sheet ' + (i + 1) + ' → ' + pages.length + ' pages')
+      await new Promise(r => setTimeout(r, 0))
+    }
+
+    console.log(`[xlsx-renderer] Generated ${pages.length} pages (segmented)`)
+    onProgress?.(1, 'Done')
+    return pages
   }
-
-  onProgress?.(0.8, 'Splitting into pages…')
-
-  // Split into A4 pages
-  const pageHScaled = PAGE_HEIGHT * SCALE
-  const pages: RenderedPage[] = []
-  let y = 0
-
-  while (y < canvasH) {
-    const remaining = canvasH - y
-    const ph = Math.min(pageHScaled, remaining)
-
-    const pc = document.createElement('canvas')
-    pc.width = canvasW
-    pc.height = ph
-    const pctx = pc.getContext('2d')!
-    pctx.fillStyle = '#ffffff'
-    pctx.fillRect(0, 0, pc.width, pc.height)
-    pctx.drawImage(master, 0, y, canvasW, ph, 0, 0, canvasW, ph)
-
-    pages.push({
-      dataUrl: pc.toDataURL('image/jpeg', 0.92),
-      width: canvasW / SCALE,
-      height: ph / SCALE,
-    })
-
-    y += ph
-    onProgress?.(0.8 + 0.2 * pages.length / Math.ceil(canvasH / pageHScaled), 'Page ' + pages.length)
-    await new Promise(r => setTimeout(r, 0))
-  }
-
-  onProgress?.(1, 'Done')
-  return pages
 }
