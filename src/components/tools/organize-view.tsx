@@ -10,7 +10,7 @@ import {
   useSortable, rectSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { RotateCw, GripVertical, Loader2, FileText } from 'lucide-react'
+import { RotateCw, GripVertical, Loader2, FileText, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { usePdfThumbnails } from '@/hooks/use-pdf'
@@ -30,22 +30,26 @@ export interface OrganizeResult {
 interface OrganizePdfViewProps {
   file: File
   onResultChange: (result: OrganizeResult | null) => void
+  onRemoveFile?: () => void
 }
 
-export function OrganizePdfView({ file, onResultChange }: OrganizePdfViewProps) {
+export function OrganizePdfView({ file, onResultChange, onRemoveFile }: OrganizePdfViewProps) {
   const { pages: thumbnails, loading, error } = usePdfThumbnails(file, 50, 0.4)
   const [items, setItems] = React.useState<OrganizePage[]>([])
 
   React.useEffect(() => {
-    if (thumbnails.length > 0 && items.length === 0) {
+    // Reset items whenever thumbnails change (new file uploaded)
+    if (thumbnails.length > 0) {
       setItems(thumbnails.map((t) => ({
-        id: `page-${t.pageNum - 1}`,
+        id: `page-${t.pageNum - 1}-${Date.now()}`,
         sourceIndex: t.pageNum - 1,
         rotation: 0,
         deleted: false,
       })))
+    } else {
+      setItems([])
     }
-  }, [thumbnails, items.length])
+  }, [thumbnails])
 
   React.useEffect(() => {
     const active = items.filter((it) => !it.deleted)
@@ -83,10 +87,18 @@ export function OrganizePdfView({ file, onResultChange }: OrganizePdfViewProps) 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm text-muted-foreground">Drag pages to reorder. Click rotate or delete.</p>
+        <div className="flex items-center gap-3">
+          <p className="text-sm text-muted-foreground">Drag pages to reorder. Click rotate or delete.</p>
+        </div>
         <div className="flex items-center gap-2">
           <Badge variant="secondary">{activeCount} active</Badge>
           {deletedCount > 0 && <Badge variant="outline" className="text-destructive">{deletedCount} deleted</Badge>}
+          {onRemoveFile && (
+            <Button variant="outline" size="sm" onClick={onRemoveFile} className="gap-1.5">
+              <X className="h-3.5 w-3.5" />
+              Change file
+            </Button>
+          )}
         </div>
       </div>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>

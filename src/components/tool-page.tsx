@@ -24,6 +24,7 @@ import {
 } from '@/components/tool-options'
 import { MergeView, type MergeFile } from '@/components/tools/merge-view'
 import { SplitView, type SplitConfig } from '@/components/tools/split-view'
+import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -88,7 +89,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isInteractive = INTERACTIVE_TOOLS.includes(tool.id)
   const isMerge = tool.id === 'merge'
   const isSplit = tool.id === 'split'
+  const isRotate = tool.id === 'rotate'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
+  const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
 
   const processing = useProcessing()
 
@@ -106,6 +109,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setInteractiveResult(null)
     setMergeOrder([])
     setSplitConfig({ mode: 'each', ranges: '' })
+    setRotateConfig({ angle: 90 })
   }, [tool.id])
 
   // Sync mergeOrder when files change (add new files to the end)
@@ -167,6 +171,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       } else if (isSplit) {
         // Split uses the SplitView config instead of the generic options
         runOptions = { ...options, mode: splitConfig.mode, ranges: splitConfig.ranges }
+      } else if (isRotate) {
+        // Rotate uses the RotateView config
+        runOptions = { ...options, angle: rotateConfig.angle }
       } else if (tool.id === 'images-to-pdf' && options.output === 'single') {
         mode = 'single'
         singleLabel = 'Combined image PDF'
@@ -303,11 +310,19 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             config={splitConfig}
             onConfigChange={setSplitConfig}
           />
+        ) : isRotate && files.length > 0 ? (
+          <RotateView
+            file={files[0].file}
+            config={rotateConfig}
+            onConfigChange={setRotateConfig}
+            onRemoveFile={() => setFiles([])}
+          />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
             toolId={tool.id}
             file={files[0].file}
             onResultChange={setInteractiveResult}
+            onRemoveFile={() => setFiles([])}
           />
         ) : cfg.mode === 'files' ? (
           <Dropzone
@@ -335,7 +350,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}
@@ -457,12 +472,14 @@ function InteractiveEditor({
   toolId,
   file,
   onResultChange,
+  onRemoveFile,
 }: {
   toolId: string
   file: File
   onResultChange: (result: OrganizeResult | CropResult | SignResult | EditResult | null) => void
+  onRemoveFile?: () => void
 }) {
-  if (toolId === 'organize') return <OrganizePdfView file={file} onResultChange={onResultChange} />
+  if (toolId === 'organize') return <OrganizePdfView file={file} onResultChange={onResultChange} onRemoveFile={onRemoveFile} />
   if (toolId === 'crop') return <CropPdfView file={file} onResultChange={onResultChange} />
   if (toolId === 'sign-annotate') return <SignAnnotateView file={file} onResultChange={onResultChange} />
   if (toolId === 'edit-text') return <EditTextView file={file} onResultChange={onResultChange} />
