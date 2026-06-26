@@ -10,7 +10,7 @@
 
 export type ProcessorType =
   | 'passthrough' // Step 2 engine preview (no-op + simulated work)
-  // Step 3+ processors are appended here as tools are implemented.
+  // Step 3 — Category A
   | 'merge'
   | 'split'
   | 'rotate'
@@ -24,14 +24,16 @@ export type ProcessorType =
   | 'compress'
   | 'repair'
   | 'unlock'
-  // Step 5 — Office conversions + remaining Category A
+  // Step 5 — Office conversions
   | 'word-to-pdf'
   | 'excel-to-pdf'
   | 'pdf-to-word'
   | 'pdf-to-excel'
-  | 'page-numbers'
-  | 'watermark'
-  | 'protect'
+  // Step 6 — Interactive tools
+  | 'organize'
+  | 'crop'
+  | 'sign-annotate'
+  | 'edit-text'
 
 export interface ProcessInput {
   id: string

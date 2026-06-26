@@ -52,6 +52,13 @@ export interface Tool {
   step: number;
   /** Optional pill label (e.g. "WASM", "Beta"). */
   tag?: string;
+  /**
+   * DEV-ONLY: When true, this tool is considered "production-locked" — its
+   * logic is complete, tested, and should NOT be modified unless explicitly
+   * requested by the user. Prevents accidental regressions during future work.
+   * This flag is backend-only metadata; it does not change runtime behavior.
+   */
+  locked?: boolean;
 }
 
 export interface CategoryMeta {
@@ -111,6 +118,7 @@ export const tools: Tool[] = [
     accent: "rose",
     batch: true,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "split",
@@ -121,6 +129,7 @@ export const tools: Tool[] = [
     accent: "rose",
     batch: true,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "organize",
@@ -164,6 +173,7 @@ export const tools: Tool[] = [
     batch: true,
     step: 4,
     tag: "WASM",
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "repair",

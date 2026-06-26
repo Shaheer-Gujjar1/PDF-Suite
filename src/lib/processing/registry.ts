@@ -23,6 +23,10 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   protect: 'protect',
   'pdf-to-images': 'pdf-to-images',
   'html-to-pdf': 'html-to-pdf',
+  organize: 'organize',
+  crop: 'crop',
+  'sign-annotate': 'sign-annotate',
+  'edit-text': 'edit-text',
 }
 
 export function getProcessor(toolId: string): ProcessorType {

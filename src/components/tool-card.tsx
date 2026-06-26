@@ -1,7 +1,7 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { ArrowRight, Layers } from 'lucide-react'
+import { ArrowRight, Layers, Lock } from 'lucide-react'
 import { type Tool, accentClasses } from '@/lib/tools'
 import { isImplemented } from '@/lib/processing/registry'
 import { cn } from '@/lib/utils'
@@ -57,6 +57,14 @@ export function ToolCard({ tool, onOpen, index = 0 }: ToolCardProps) {
           {!ready && (
             <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
               Soon
+            </span>
+          )}
+          {tool.locked && (
+            <span
+              title="Production-locked: do not modify unless explicitly asked"
+              className="inline-flex items-center gap-0.5 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400"
+            >
+              <Lock className="h-2.5 w-2.5" />
             </span>
           )}
         </div>

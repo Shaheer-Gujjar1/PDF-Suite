@@ -888,6 +888,118 @@ processors['pdf-to-excel'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Organize PDF (reorder/delete/rotate pages) ------------------------ */
+/* options.pages = [{ source: 0, rotation: 0 }, ...] — source is 0-indexed original page */
+processors['organize'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var pagePlan = (opts && opts.pages) || null;
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Organizing ' + inputs[i].fileName);
+    var src = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    var dst = await lib.PDFDocument.create();
+    var plan = pagePlan || src.getPageIndices().map(function (idx) { return { source: idx, rotation: 0 }; });
+    var sourceIndices = plan.map(function (p) { return p.source; });
+    var copied = await dst.copyPages(src, sourceIndices);
+    for (var p = 0; p < plan.length; p++) {
+      var page = copied[p];
+      var rot = (plan[p].rotation || 0) % 360;
+      if (rot) { var cur = page.getRotation().angle; page.setRotation(lib.degrees((cur + rot) % 360)); }
+      dst.addPage(page);
+    }
+    var bytes = await dst.save({ useObjectStreams: true });
+    out.push({ name: stripExt(inputs[i].fileName) + '-organized.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: plan.length + ' pages' });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Crop PDF (apply crop boxes) --------------------------------------- */
+/* options.crop = { x, y, width, height } in PDF points (origin bottom-left) */
+processors['crop'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var crop = opts && opts.crop;
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Cropping ' + inputs[i].fileName);
+    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    var pages = doc.getPages();
+    for (var p = 0; p < pages.length; p++) {
+      if (crop) {
+        pages[p].setCropBox(crop.x, crop.y, crop.width, crop.height);
+        pages[p].setMediaBox(crop.x, crop.y, crop.width, crop.height);
+      }
+    }
+    var bytes = await doc.save({ useObjectStreams: true });
+    out.push({ name: stripExt(inputs[i].fileName) + '-cropped.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: crop ? (Math.round(crop.width) + 'x' + Math.round(crop.height) + 'pt') : 'no change' });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Sign & Annotate (overlay image annotations) ---------------------- */
+/* options.annotations = [{ type: 'image', data: base64, mime, x, y, width, height, page }] */
+processors['sign-annotate'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var annotations = (opts && opts.annotations) || [];
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Applying annotations to ' + inputs[i].fileName);
+    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    var pages = doc.getPages();
+    for (var a = 0; a < annotations.length; a++) {
+      var ann = annotations[a];
+      var pageIdx = Math.min(ann.page || 0, pages.length - 1);
+      var page = pages[pageIdx];
+      if (ann.type === 'image' && ann.data) {
+        var raw = atob(ann.data);
+        var arr = new Uint8Array(raw.length);
+        for (var b = 0; b < raw.length; b++) arr[b] = raw.charCodeAt(b);
+        var conv = await toEmbeddable(arr.buffer, ann.mime || 'image/png');
+        var img = conv.kind === 'png' ? await doc.embedPng(conv.bytes) : await doc.embedJpg(conv.bytes);
+        page.drawImage(img, { x: ann.x || 0, y: ann.y || 0, width: ann.width || img.width, height: ann.height || img.height });
+      }
+    }
+    var bytes = await doc.save({ useObjectStreams: true });
+    out.push({ name: stripExt(inputs[i].fileName) + '-signed.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: annotations.length + ' annotation(s)' });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
+/* ---- Edit PDF Text (overlay corrected text with whiteout) ------------- */
+/* options.edits = [{ page, x, y, text, size, whiteout: {x,y,w,h} }] */
+processors['edit-text'] = async function (inputs, opts, onProgress, log) {
+  var lib = getPDFLib();
+  var edits = (opts && opts.edits) || [];
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Editing text in ' + inputs[i].fileName);
+    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    var pages = doc.getPages();
+    var font = await doc.embedFont(lib.StandardFonts.Helvetica);
+    for (var e = 0; e < edits.length; e++) {
+      var edit = edits[e];
+      var pageIdx = Math.min(edit.page || 0, pages.length - 1);
+      var page = pages[pageIdx];
+      if (edit.whiteout) {
+        page.drawRectangle({ x: edit.whiteout.x, y: edit.whiteout.y, width: edit.whiteout.w, height: edit.whiteout.h, color: lib.rgb(1, 1, 1) });
+      }
+      if (edit.text) {
+        page.drawText(edit.text, { x: edit.x || 50, y: edit.y || 50, font: font, size: edit.size || 11, color: lib.rgb(0, 0, 0) });
+      }
+    }
+    var bytes = await doc.save({ useObjectStreams: true });
+    out.push({ name: stripExt(inputs[i].fileName) + '-edited.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: edits.length + ' edit(s)' });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

@@ -23,6 +23,7 @@ import {
   type ToolOptionsMap,
 } from '@/components/tool-options'
 import { MergeView, type MergeFile } from '@/components/tools/merge-view'
+import { SplitView, type SplitConfig } from '@/components/tools/split-view'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -86,6 +87,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const preview = !implemented
   const isInteractive = INTERACTIVE_TOOLS.includes(tool.id)
   const isMerge = tool.id === 'merge'
+  const isSplit = tool.id === 'split'
+  const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
 
   const processing = useProcessing()
 
@@ -102,6 +105,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setOptions(defaultOptions(tool.id))
     setInteractiveResult(null)
     setMergeOrder([])
+    setSplitConfig({ mode: 'each', ranges: '' })
   }, [tool.id])
 
   // Sync mergeOrder when files change (add new files to the end)
@@ -160,6 +164,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       if (isMerge) {
         mode = 'single'
         singleLabel = 'Merged document'
+      } else if (isSplit) {
+        // Split uses the SplitView config instead of the generic options
+        runOptions = { ...options, mode: splitConfig.mode, ranges: splitConfig.ranges }
       } else if (tool.id === 'images-to-pdf' && options.output === 'single') {
         mode = 'single'
         singleLabel = 'Combined image PDF'
@@ -290,6 +297,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onRemove={handleMergeRemove}
             onAddMore={handleAddMore}
           />
+        ) : isSplit && files.length > 0 ? (
+          <SplitView
+            file={files[0].file}
+            config={splitConfig}
+            onConfigChange={setSplitConfig}
+          />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
             toolId={tool.id}
@@ -322,7 +335,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}
