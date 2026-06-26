@@ -253,24 +253,24 @@ function CompressOptions({
     {
       id: 'low',
       title: 'Low',
-      desc: 'Lossless. Strips metadata & optimizes structure. Text stays selectable.',
-      reduction: '~3-7%',
+      desc: 'Lossless structural + light image optimization. Text stays selectable.',
+      reduction: '~5-15%',
       icon: '📏',
       color: 'emerald',
     },
     {
       id: 'normal',
       title: 'Normal',
-      desc: 'Rasterizes pages at medium quality. Good balance of size & clarity.',
-      reduction: '~40-50%',
+      desc: 'Recompresss images at medium quality. Text stays selectable. Recommended.',
+      reduction: '~30-60%',
       icon: '⚖️',
       color: 'amber',
     },
     {
       id: 'extreme',
       title: 'Extreme',
-      desc: 'Aggressive rasterization at low resolution. Smallest possible file.',
-      reduction: '~70-80%',
+      desc: 'Full page rasterization at low resolution. Smallest file, text not selectable.',
+      reduction: '~70-90%',
       icon: '🔥',
       color: 'rose',
     },
@@ -330,12 +330,20 @@ function CompressOptions({
           )
         })}
       </div>
-      {level !== 'low' && (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-muted-foreground">
+      {level === 'extreme' ? (
+        <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 text-xs text-muted-foreground">
           <span className="mt-0.5">⚠️</span>
           <span>
             Pages are converted to images — text won't be selectable after
-            compression. Choose <strong>Low</strong> to keep text selectable.
+            compression. Choose <strong>Low</strong> or <strong>Normal</strong> to keep text selectable.
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs text-muted-foreground">
+          <span className="mt-0.5">✓</span>
+          <span>
+            Text stays fully selectable — only embedded images are recompressed.
+            Choose <strong>Extreme</strong> for maximum compression (text becomes images).
           </span>
         </div>
       )}

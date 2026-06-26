@@ -237,10 +237,10 @@ function fmtBytes(n) {
   return parseFloat((n / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/* ---- Compress PDF (3 levels with smart fallback) ----------------------- */
-/* Low: lossless structural (object streams + strip metadata). ~3-7% on verbose PDFs.
-   Normal: rasterize at 1.0x → JPEG q0.5. Falls back to lossless if rasterized is larger.
-   Extreme: rasterize at 0.6x → JPEG q0.3. Falls back to normal if larger. */
+/* ---- Compress PDF (3 levels — text stays selectable on Low/Normal) ----- */
+/* Low: lossless structural + light image recompression (q0.85). Text selectable.
+   Normal: structural + medium image recompression (q0.5, downsample to 1200px). Text selectable.
+   Extreme: full page rasterization at 0.6x → JPEG q0.3. Text NOT selectable. */
 processors['compress'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
   var level = (opts && opts.level) || 'normal';
@@ -249,17 +249,105 @@ processors['compress'] = async function (inputs, opts, onProgress, log) {
   /* Helper: lossless structural compression */
   async function losslessCompress(data) {
     var doc = await lib.PDFDocument.load(data, { ignoreEncryption: true });
-    try {
-      doc.setTitle(''); doc.setAuthor(''); doc.setSubject('');
-      doc.setKeywords([]); doc.setCreator(''); doc.setProducer('');
-    } catch (_) {}
+    try { doc.setTitle(''); doc.setAuthor(''); doc.setSubject(''); doc.setKeywords([]); doc.setCreator(''); doc.setProducer(''); } catch (_) {}
     return await doc.save({ useObjectStreams: true, addDefaultPage: false });
   }
 
-  /* Helper: rasterize pages to JPEG → new PDF */
+  /* Helper: in-place image recompression — finds JPEG images in the PDF,
+     decodes and re-encodes them at lower quality. Text stays as vector text. */
+  async function recompressImages(data, quality, maxDim, progressBase, progressSpan) {
+    var doc = await lib.PDFDocument.load(data, { ignoreEncryption: true });
+    try { doc.setTitle(''); doc.setAuthor(''); doc.setSubject(''); doc.setKeywords([]); doc.setCreator(''); doc.setProducer(''); } catch (_) {}
+
+    var context = doc.context;
+    var PDFName = lib.PDFName;
+    var PDFNumber = lib.PDFNumber;
+    var PDFRawStream = lib.PDFRawStream;
+    var imageCount = 0;
+    var totalImages = 0;
+
+    /* Enumerate all indirect objects to find image XObjects */
+    var entries = Array.from(context.enumerateIndirectObjects());
+    var imageEntries = [];
+
+    for (var k = 0; k < entries.length; k++) {
+      var ref = entries[k][0];
+      var obj = entries[k][1];
+      if (!obj || !obj.dict) continue;
+      var subtype = obj.dict.get(PDFName.of('Subtype'));
+      if (!subtype || subtype.toString() !== '/Image') continue;
+
+      var filter = obj.dict.get(PDFName.of('Filter'));
+      var filterStr = '';
+      if (filter) {
+        if (filter.toString) filterStr = filter.toString();
+        else if (filter.array) filterStr = filter.array.map(function (f) { return f.toString ? f.toString() : ''; }).join(' ');
+      }
+
+      /* Only handle DCTDecode (JPEG) images — the most common type in PDFs */
+      if (filterStr.indexOf('DCTDecode') > -1) {
+        imageEntries.push([ref, obj]);
+      }
+    }
+
+    totalImages = imageEntries.length;
+
+    for (var j = 0; j < imageEntries.length; j++) {
+      var ref2 = imageEntries[j][0];
+      var obj2 = imageEntries[j][1];
+      try {
+        var jpegBytes = obj2.contents;
+        if (!jpegBytes || jpegBytes.length < 100) continue;
+
+        /* Decode the JPEG to a bitmap */
+        var blob = new Blob([jpegBytes], { type: 'image/jpeg' });
+        var bmp = await createImageBitmap(blob);
+
+        /* Downsample if larger than maxDim */
+        var scale = 1;
+        if (maxDim > 0 && (bmp.width > maxDim || bmp.height > maxDim)) {
+          scale = maxDim / Math.max(bmp.width, bmp.height);
+        }
+        var w = Math.max(1, Math.round(bmp.width * scale));
+        var h = Math.max(1, Math.round(bmp.height * scale));
+
+        var canvas = new OffscreenCanvas(w, h);
+        var ctx = canvas.getContext('2d');
+        if (!ctx) continue;
+        ctx.drawImage(bmp, 0, 0, w, h);
+        var newJpeg = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality });
+        var newBytes = new Uint8Array(await newJpeg.arrayBuffer());
+
+        /* Only replace if the recompressed version is smaller */
+        if (newBytes.length < jpegBytes.length) {
+          /* Update the stream dictionary */
+          obj2.dict.set(PDFName.of('Length'), PDFNumber.of(newBytes.length));
+          if (scale < 1) {
+            obj2.dict.set(PDFName.of('Width'), PDFNumber.of(w));
+            obj2.dict.set(PDFName.of('Height'), PDFNumber.of(h));
+          }
+          /* Replace the stream with new contents */
+          var newStream = PDFRawStream.of(obj2.dict, newBytes);
+          context.assign(ref2, newStream);
+          imageCount++;
+        }
+        bmp.close();
+      } catch (e) {
+        /* Skip images that fail to process */
+      }
+      onProgress(progressBase + (progressSpan * ((j + 1) / totalImages)));
+    }
+
+    var bytes = await doc.save({ useObjectStreams: true, addDefaultPage: false });
+    return { bytes: bytes, imageCount: imageCount, totalImages: totalImages };
+  }
+
+  /* Helper: full page rasterization (Extreme only) */
   async function rasterize(data, scale, quality, progressBase, progressSpan) {
     var pdfjs = await loadPdfJs();
-    var srcDoc = await pdfjs.getDocument({ data: new Uint8Array(data), useWorkerFetch: false, isEvalSupported: false }).promise;
+    /* Copy the data — pdf.js transfers/detaches the ArrayBuffer internally */
+    var dataCopy = data.slice(0);
+    var srcDoc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
     var newDoc = await lib.PDFDocument.create();
     var pageCount = srcDoc.numPages;
     for (var p = 1; p <= pageCount; p++) {
@@ -270,7 +358,6 @@ processors['compress'] = async function (inputs, opts, onProgress, log) {
       var canvas = new OffscreenCanvas(w, h);
       var ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('Could not get 2D context for page ' + p);
-      /* White background (JPEG doesn't support transparency) */
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
       await page.render({ canvasContext: ctx, viewport: viewport }).promise;
@@ -290,42 +377,50 @@ processors['compress'] = async function (inputs, opts, onProgress, log) {
     var orig = inputs[i].data.byteLength;
     log('Compressing ' + inputs[i].fileName + ' (' + fmtBytes(orig) + ') — ' + level);
     var bytes;
-    var usedFallback = false;
+    var noteExtra = '';
 
     if (level === 'low') {
-      bytes = await losslessCompress(inputs[i].data);
+      /* Low: lossless + light image recompression (q0.85, no downsampling) */
+      var lowResult = await recompressImages(inputs[i].data, 0.85, 0, i / inputs.length, 0.9 / inputs.length);
+      bytes = lowResult.bytes;
+      if (lowResult.imageCount > 0) noteExtra = ' · ' + lowResult.imageCount + ' image(s) optimized · text selectable';
+      else noteExtra = ' · text selectable';
       onProgress((i + 1) / inputs.length);
-    } else {
-      /* Rasterize with level-specific params */
-      var scale = level === 'extreme' ? 0.6 : 1.0;
-      var quality = level === 'extreme' ? 0.3 : 0.5;
-      var rasterBytes = await rasterize(inputs[i].data, scale, quality, i / inputs.length, 0.8 / inputs.length);
-
-      /* Smart fallback: if rasterized is LARGER than original, use lossless instead */
-      if (rasterBytes.byteLength >= orig) {
-        log('Rasterized result larger than original — falling back to lossless');
-        bytes = await losslessCompress(inputs[i].data);
-        usedFallback = true;
-      } else {
-        /* For extreme, if the result is still not great, try even lower quality */
-        if (level === 'extreme' && rasterBytes.byteLength > orig * 0.5) {
-          var extremeBytes = await rasterize(inputs[i].data, 0.5, 0.25, (i + 0.8) / inputs.length, 0.2 / inputs.length);
-          if (extremeBytes.byteLength < rasterBytes.byteLength) {
-            bytes = extremeBytes;
-          } else {
-            bytes = rasterBytes;
-          }
-        } else {
-          bytes = rasterBytes;
+    } else if (level === 'normal') {
+      /* Normal: structural + medium image recompression (q0.5, downsample to 1200px) */
+      var normResult = await recompressImages(inputs[i].data, 0.5, 1200, i / inputs.length, 0.9 / inputs.length);
+      bytes = normResult.bytes;
+      if (normResult.imageCount > 0) noteExtra = ' · ' + normResult.imageCount + ' image(s) recompressed · text selectable';
+      else noteExtra = ' · text selectable';
+      /* If normal didn't help enough, try rasterizing as fallback */
+      if (bytes.byteLength >= orig * 0.85) {
+        log('Image recompression insufficient — trying page rasterization');
+        var rasterFallback = await rasterize(inputs[i].data, 1.0, 0.5, (i + 0.9) / inputs.length, 0.1 / inputs.length);
+        if (rasterFallback.byteLength < bytes.byteLength) {
+          bytes = rasterFallback;
+          noteExtra = ' · pages rasterized (text not selectable)';
         }
       }
+      onProgress((i + 1) / inputs.length);
+    } else {
+      /* Extreme: full rasterization at 0.6x → JPEG q0.3 */
+      var extremeBytes = await rasterize(inputs[i].data, 0.6, 0.3, i / inputs.length, 0.9 / inputs.length);
+      /* Try even more aggressive if result is still large */
+      if (extremeBytes.byteLength > orig * 0.4) {
+        var extraBytes = await rasterize(inputs[i].data, 0.5, 0.25, (i + 0.9) / inputs.length, 0.1 / inputs.length);
+        if (extraBytes.byteLength < extremeBytes.byteLength) {
+          extremeBytes = extraBytes;
+        }
+      }
+      bytes = extremeBytes;
+      noteExtra = ' · pages rasterized (text not selectable)';
       onProgress((i + 1) / inputs.length);
     }
 
     var comp = bytes.byteLength;
     var pct = orig > 0 ? Math.round((1 - comp / orig) * 100) : 0;
     var note = fmtBytes(orig) + ' → ' + fmtBytes(comp) + (pct > 0 ? ' (' + pct + '% smaller)' : (pct < 0 ? ' (' + (-pct) + '% larger)' : ' (no change)'));
-    if (usedFallback) note += ' · lossless fallback';
+    note += noteExtra;
     out.push({
       name: stripExt(inputs[i].fileName) + '-compressed.pdf',
       data: toArrayBuffer(bytes),
