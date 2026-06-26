@@ -28,6 +28,7 @@ import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
 import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/images-to-pdf-view'
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
+import { renderDocxToPages } from '@/lib/docx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
 import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
@@ -175,12 +176,58 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let mode: 'per-file' | 'single' = 'per-file'
     let singleLabel: string | undefined
     let runOptions = options
+    let actualProcessor = processor
 
     if (cfg.mode === 'text') {
       const data = new TextEncoder().encode(html).buffer as ArrayBuffer
       inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
       mode = 'single'
       singleLabel = 'HTML → PDF output'
+    } else if (isWordToPdf) {
+      // Word to PDF: pre-render DOCX to page images on the main thread
+      // (using mammoth + html2canvas), then send images to the worker
+      // which wraps them in a PDF. This makes the output look exactly like Word.
+      const orderedFiles = wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
+      let allRendered = true
+      for (const qf of orderedFiles) {
+        try {
+          const pages = await renderDocxToPages(qf.file)
+          if (pages.length === 0) throw new Error('No pages rendered')
+          for (const page of pages) {
+            // Convert data URL to ArrayBuffer
+            const base64 = page.dataUrl.split(',')[1]
+            const binary = atob(base64)
+            const arr = new Uint8Array(binary.length)
+            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+            // Verify the JPEG starts with the correct magic bytes (0xFF 0xD8)
+            if (arr[0] !== 0xff || arr[1] !== 0xd8) {
+              throw new Error('Invalid JPEG data')
+            }
+            inputs.push({
+              fileName: 'page-' + (inputs.length + 1) + '.jpg',
+              data: arr.buffer,
+              size: arr.buffer.byteLength,
+            })
+          }
+        } catch (e) {
+          // Fallback: send raw DOCX to the worker's word-to-pdf processor
+          console.error('DOCX render failed, falling back:', e)
+          allRendered = false
+          const data = await qf.file.arrayBuffer()
+          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        }
+      }
+      if (allRendered) {
+        // Use the images-to-pdf processor to wrap the page images in a PDF
+        actualProcessor = 'images-to-pdf'
+        runOptions = { ...options, output: 'single', pageSize: 'fit' }
+      } else {
+        // Fallback: use the word-to-pdf processor with the raw DOCX
+        actualProcessor = 'word-to-pdf'
+        runOptions = options
+      }
+      mode = 'single'
+      singleLabel = 'Word → PDF output'
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
@@ -233,7 +280,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
     }
 
-    await processing.run({ processor, mode, inputs, options: runOptions, singleLabel })
+    await processing.run({ processor: actualProcessor, mode, inputs, options: runOptions, singleLabel })
   }
 
   // Merge file handlers
