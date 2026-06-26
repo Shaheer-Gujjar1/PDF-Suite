@@ -6,7 +6,6 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Slider } from '@/components/ui/slider'
 import { type Tool } from '@/lib/tools'
 import { cn } from '@/lib/utils'
@@ -36,7 +35,7 @@ export function defaultOptions(toolId: string): ToolOptionsMap {
     case 'images-to-pdf':
       return { output: 'single', pageSize: 'fit' }
     case 'compress':
-      return { stripMetadata: false }
+      return { level: 'normal' }
     case 'unlock':
       return { password: '' }
     case 'page-numbers':
@@ -249,34 +248,97 @@ function CompressOptions({
   options: ToolOptionsMap
   set: (key: string, value: unknown) => void
 }) {
-  const strip = !!options.stripMetadata
+  const level = (options.level as string) || 'normal'
+  const levels = [
+    {
+      id: 'low',
+      title: 'Low',
+      desc: 'Lossless structural compression. Text stays selectable.',
+      reduction: 'Minimal',
+      icon: '📏',
+      color: 'emerald',
+    },
+    {
+      id: 'normal',
+      title: 'Normal',
+      desc: 'Pages rasterized to JPEG at high quality. Good balance.',
+      reduction: 'Recommended',
+      icon: '⚖️',
+      color: 'amber',
+    },
+    {
+      id: 'extreme',
+      title: 'Extreme',
+      desc: 'Aggressive JPEG at lower resolution. Smallest file.',
+      reduction: 'Maximum',
+      icon: '🔥',
+      color: 'rose',
+    },
+  ] as const
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 rounded-xl border border-border bg-card p-3.5">
-        <Checkbox
-          id="strip-meta"
-          checked={strip}
-          onCheckedChange={(v) => set('stripMetadata', v === true)}
-          className="mt-0.5"
-        />
-        <div className="space-y-0.5">
-          <Label htmlFor="strip-meta" className="cursor-pointer text-sm font-medium">
-            Strip metadata
-          </Label>
-          <p className="text-xs text-muted-foreground">
-            Remove title, author, keywords and other document properties for a
-            smaller, more private file. Text stays fully selectable.
-          </p>
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {levels.map((lv) => {
+          const active = level === lv.id
+          return (
+            <button
+              key={lv.id}
+              type="button"
+              onClick={() => set('level', lv.id)}
+              className={cn(
+                'group relative flex flex-col items-start rounded-xl border p-4 text-left transition-all',
+                active
+                  ? lv.color === 'emerald'
+                    ? 'border-emerald-500 bg-emerald-500/5 ring-2 ring-emerald-500/20'
+                    : lv.color === 'amber'
+                      ? 'border-amber-500 bg-amber-500/5 ring-2 ring-amber-500/20'
+                      : 'border-rose-500 bg-rose-500/5 ring-2 ring-rose-500/20'
+                  : 'border-border bg-card hover:border-primary/40 hover:shadow-sm'
+              )}
+            >
+              <div className="mb-2 flex w-full items-center justify-between">
+                <span className="text-2xl">{lv.icon}</span>
+                {active && (
+                  <span
+                    className={cn(
+                      'flex h-5 w-5 items-center justify-center rounded-full text-white',
+                      lv.color === 'emerald' && 'bg-emerald-500',
+                      lv.color === 'amber' && 'bg-amber-500',
+                      lv.color === 'rose' && 'bg-rose-500'
+                    )}
+                  >
+                    <svg viewBox="0 0 24 24" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="3">
+                      <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </span>
+                )}
+              </div>
+              <span className="text-sm font-semibold">{lv.title}</span>
+              <span className="mt-1 text-xs text-muted-foreground">{lv.desc}</span>
+              <span
+                className={cn(
+                  'mt-2 inline-block rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide',
+                  lv.color === 'emerald' && 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+                  lv.color === 'amber' && 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+                  lv.color === 'rose' && 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                )}
+              >
+                {lv.reduction}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+      {level !== 'low' && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-muted-foreground">
+          <span className="mt-0.5">⚠️</span>
+          <span>
+            Pages are converted to images — text won't be selectable after
+            compression. Choose <strong>Low</strong> to keep text selectable.
+          </span>
         </div>
-      </div>
-      <div className="flex items-start gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 text-xs text-muted-foreground">
-        <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
-        <span>
-          Lossless compression — rewrites object streams and removes structural
-          bloat while keeping all text, images and vectors intact. Best results
-          on PDFs saved without compression or with verbose structure.
-        </span>
-      </div>
+      )}
     </div>
   )
 }

@@ -237,22 +237,50 @@ function fmtBytes(n) {
   return parseFloat((n / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-/* ---- Compress PDF (lossless, stream + metadata) ------------------------ */
+/* ---- Compress PDF (3 levels: structural / rasterize / aggressive) ------ */
+/* Low: object streams + metadata strip (lossless, minimal reduction).
+   Normal: render each page to JPEG q0.7 at 1.5x → new PDF (good reduction, loses text selectability).
+   Extreme: render each page to JPEG q0.4 at 1.0x → new PDF (max reduction, lower quality). */
 processors['compress'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
-  var stripMeta = !!(opts && opts.stripMetadata);
+  var level = (opts && opts.level) || 'normal';
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     var orig = inputs[i].data.byteLength;
-    log('Compressing ' + inputs[i].fileName + ' (' + fmtBytes(orig) + ')');
-    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
-    if (stripMeta) {
-      try {
-        doc.setTitle(''); doc.setAuthor(''); doc.setSubject('');
-        doc.setKeywords([]); doc.setCreator(''); doc.setProducer('PDF Suite');
-      } catch (_) {}
+    log('Compressing ' + inputs[i].fileName + ' (' + fmtBytes(orig) + ') — ' + level);
+    var bytes;
+
+    if (level === 'low') {
+      /* Structural only: object streams + metadata strip */
+      var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+      try { doc.setTitle(''); doc.setAuthor(''); doc.setSubject(''); doc.setKeywords([]); doc.setCreator(''); doc.setProducer('PDF Suite'); } catch (_) {}
+      bytes = await doc.save({ useObjectStreams: true, addDefaultPage: false });
+    } else {
+      /* Rasterize pages → JPEG → new PDF (real compression) */
+      var scale = level === 'extreme' ? 1.0 : 1.5;
+      var quality = level === 'extreme' ? 0.4 : 0.7;
+      var pdfjs = await loadPdfJs();
+      var srcDoc = await pdfjs.getDocument({ data: new Uint8Array(inputs[i].data), useWorkerFetch: false, isEvalSupported: false }).promise;
+      var newDoc = await lib.PDFDocument.create();
+      var pageCount = srcDoc.numPages;
+      for (var p = 1; p <= pageCount; p++) {
+        var page = await srcDoc.getPage(p);
+        var viewport = page.getViewport({ scale: scale });
+        var canvas = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+        var ctx = canvas.getContext('2d');
+        await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+        var jpgBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: quality });
+        var jpgArr = new Uint8Array(await jpgBlob.arrayBuffer());
+        var img = await newDoc.embedJpg(jpgArr);
+        var newPage = newDoc.addPage([viewport.width, viewport.height]);
+        newPage.drawImage(img, { x: 0, y: 0, width: viewport.width, height: viewport.height });
+        try { await page.cleanup(); } catch (_) {}
+        onProgress((i + (p / pageCount)) / inputs.length);
+      }
+      try { await srcDoc.destroy(); } catch (_) {}
+      bytes = await newDoc.save({ useObjectStreams: true });
     }
-    var bytes = await doc.save({ useObjectStreams: true, addDefaultPage: false });
+
     var comp = bytes.byteLength;
     var pct = orig > 0 ? Math.round((1 - comp / orig) * 100) : 0;
     var note = fmtBytes(orig) + ' → ' + fmtBytes(comp) + (pct > 0 ? ' (' + pct + '% smaller)' : (pct < 0 ? ' (' + (-pct) + '% larger)' : ' (no change)'));
@@ -262,7 +290,7 @@ processors['compress'] = async function (inputs, opts, onProgress, log) {
       mime: 'application/pdf',
       note: note
     });
-    onProgress((i + 1) / inputs.length);
+    if (level === 'low') onProgress((i + 1) / inputs.length);
   }
   onProgress(1);
   return out;
