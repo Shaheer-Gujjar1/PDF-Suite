@@ -187,46 +187,132 @@ processors['images-to-pdf'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
   var output = (opts && opts.output) || 'single';
   var pageSize = (opts && opts.pageSize) || 'fit';
+  var orientation = (opts && opts.orientation) || 'portrait';
+  var margin = (opts && Number(opts.margin)) || 0;
+  var pageRotations = (opts && opts.pages) || null; /* [{ id, rotation }] */
+  var selectedIds = (opts && opts.selectedIds) || [];
 
-  async function buildPage(doc, conv) {
+  /* Build a rotation lookup from page config (id → rotation).
+     inputs don't have IDs, so we map by index order. */
+  var rotationMap = {};
+  if (pageRotations && pageRotations.length) {
+    for (var ri = 0; ri < pageRotations.length; ri++) {
+      rotationMap[ri] = pageRotations[ri].rotation || 0;
+    }
+  }
+
+  /* Get page dimensions based on size + orientation */
+  function getPageDims() {
+    if (pageSize === 'fit') return null; /* null = use image dimensions */
+    var dims = PAGE_DIMS[pageSize] || PAGE_DIMS.a4;
+    var isPortrait = orientation === 'portrait';
+    return isPortrait ? [Math.min(dims[0], dims[1]), Math.max(dims[0], dims[1])]
+                      : [Math.max(dims[0], dims[1]), Math.min(dims[0], dims[1])];
+  }
+
+  /* Build a single page with the image */
+  async function buildPage(doc, data, fileName, index) {
+    var mime = guessMime(fileName);
+    var conv = await toEmbeddable(data, mime);
     var img = conv.kind === 'png' ? await doc.embedPng(conv.bytes) : await doc.embedJpg(conv.bytes);
+
+    /* Apply per-image rotation to the embedded image dimensions */
+    var imgRot = rotationMap[index] || 0;
+    var imgW = img.width, imgH = img.height;
+    if (imgRot === 90 || imgRot === 270) { var tmp = imgW; imgW = imgH; imgH = tmp; }
+
+    var pageDims = getPageDims();
     var page;
-    if (pageSize === 'fit') {
-      page = doc.addPage([img.width, img.height]);
-      page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+    if (!pageDims) {
+      /* Fit to image — page size = image size (after rotation) */
+      pageDims = [imgW, imgH];
+      page = doc.addPage(pageDims);
+      page.drawImage(img, {
+        x: 0, y: 0, width: imgW, height: imgH,
+        rotate: lib.degrees(imgRot)
+      });
     } else {
-      var dims = PAGE_DIMS[pageSize] || PAGE_DIMS.a4;
-      page = doc.addPage(dims);
-      var f = fitInto(img.width, img.height, dims[0], dims[1]);
-      page.drawImage(img, { x: f.x, y: f.y, width: f.width, height: f.height });
+      page = doc.addPage(pageDims);
+      /* Fit image within page minus margins */
+      var availW = pageDims[0] - margin * 2;
+      var availH = pageDims[1] - margin * 2;
+      var scale = Math.min(availW / imgW, availH / imgH);
+      var drawW = imgW * scale, drawH = imgH * scale;
+      var x = margin + (availW - drawW) / 2;
+      var y = margin + (availH - drawH) / 2;
+      page.drawImage(img, {
+        x: x, y: y, width: drawW, height: drawH,
+        rotate: lib.degrees(imgRot)
+      });
     }
     return img;
   }
 
+  /* Single mode: all images → 1 PDF */
   if (output === 'single') {
     var doc = await lib.PDFDocument.create();
     for (var i = 0; i < inputs.length; i++) {
       log('Adding ' + inputs[i].fileName);
-      var conv = await toEmbeddable(inputs[i].data, guessMime(inputs[i].fileName));
-      await buildPage(doc, conv);
+      await buildPage(doc, inputs[i].data, inputs[i].fileName, i);
       onProgress((i + 1) / inputs.length);
     }
     var bytes = await doc.save();
     onProgress(1);
-    return [{ name: 'images.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf' }];
-  } else {
+    return [{ name: 'images.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: inputs.length + ' image(s)' }];
+
+  /* Multiple mode: each image → 1 PDF */
+  } else if (output === 'multiple') {
     var outs = [];
     for (var j = 0; j < inputs.length; j++) {
       log('Converting ' + inputs[j].fileName);
       var doc2 = await lib.PDFDocument.create();
-      var conv2 = await toEmbeddable(inputs[j].data, guessMime(inputs[j].fileName));
-      await buildPage(doc2, conv2);
+      await buildPage(doc2, inputs[j].data, inputs[j].fileName, j);
       var b2 = await doc2.save();
       outs.push({ name: stripExt(inputs[j].fileName) + '.pdf', data: toArrayBuffer(b2), mime: 'application/pdf' });
       onProgress((j + 1) / inputs.length);
     }
     onProgress(1);
     return outs;
+
+  /* Mixed mode: selected → 1 PDF, rest → separate PDFs */
+  } else if (output === 'mixed') {
+    var selectedSet = {};
+    for (var si = 0; si < selectedIds.length; si++) selectedSet[selectedIds[si]] = true;
+    /* Map selectedIds to input indices — inputs are in the same order as pages config */
+    /* The selectedIds correspond to the page IDs, which map to input indices by position */
+    var mixedOuts = [];
+    var selectedDoc = await lib.PDFDocument.create();
+    var selectedCount = 0;
+    var separateCount = 0;
+
+    for (var k = 0; k < inputs.length; k++) {
+      /* Check if this input index is in the selected set */
+      var pageId = (pageRotations && pageRotations[k]) ? pageRotations[k].id : null;
+      var isSelected = pageId && selectedSet[pageId];
+      if (isSelected) {
+        log('Adding ' + inputs[k].fileName + ' to combined PDF');
+        await buildPage(selectedDoc, inputs[k].data, inputs[k].fileName, k);
+        selectedCount++;
+        onProgress((k + 1) / inputs.length);
+      } else {
+        log('Creating separate PDF for ' + inputs[k].fileName);
+        var sepDoc = await lib.PDFDocument.create();
+        await buildPage(sepDoc, inputs[k].data, inputs[k].fileName, k);
+        var sepBytes = await sepDoc.save();
+        mixedOuts.push({ name: stripExt(inputs[k].fileName) + '.pdf', data: toArrayBuffer(sepBytes), mime: 'application/pdf' });
+        separateCount++;
+        onProgress((k + 1) / inputs.length);
+      }
+    }
+
+    /* Add the combined PDF first if any selected */
+    if (selectedCount > 0) {
+      var combinedBytes = await selectedDoc.save();
+      mixedOuts.unshift({ name: 'selected-images.pdf', data: toArrayBuffer(combinedBytes), mime: 'application/pdf', note: selectedCount + ' image(s) combined' });
+    }
+
+    onProgress(1);
+    return mixedOuts;
   }
 };
 
