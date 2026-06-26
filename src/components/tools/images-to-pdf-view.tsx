@@ -136,16 +136,46 @@ export function ImagesToPdfView({ files, config, onConfigChange, onRemove, onAdd
   const selectedCount = pages.filter((p) => p.selected).length
   const pageCount = pages.length
 
-  // Page preview dimensions for the layout preview
-  const previewDims = React.useMemo(() => {
-    if (config.pageSize === 'fit') return { w: 120, h: 80, label: 'Fit to image' }
+  // Page preview — renders a realistic page with the first image inside
+  const previewData = React.useMemo(() => {
+    const MAX_H = 140 // max preview height in px
+    const label = config.pageSize === 'fit'
+      ? `Fit to image · ${config.orientation}`
+      : `${config.pageSize === 'a4' ? 'A4' : 'US Letter'} · ${config.orientation}`
+
+    if (config.pageSize === 'fit') {
+      // For fit mode, use the first image's aspect ratio
+      const firstUrl = previewUrls.get(pages[0]?.id || '')
+      if (firstUrl && pages[0]) {
+        // We don't know the exact dimensions without loading, so use 3:4 as default portrait
+        const isPortrait = config.orientation === 'portrait'
+        const aspectW = isPortrait ? 3 : 4
+        const aspectH = isPortrait ? 4 : 3
+        const h = MAX_H
+        const w = (h * aspectW) / aspectH
+        return { w, h, label, showImage: true, imageUrl: firstUrl, imageRotation: pages[0]?.rotation || 0 }
+      }
+      const isPortrait = config.orientation === 'portrait'
+      const h = MAX_H
+      const w = (h * (isPortrait ? 3 : 4)) / (isPortrait ? 4 : 3)
+      return { w, h, label, showImage: false, imageUrl: null, imageRotation: 0 }
+    }
+
+    // For A4/Letter, use real proportions
     const [pw, ph] = PAGE_DIMS[config.pageSize] || PAGE_DIMS.a4
     const isPortrait = config.orientation === 'portrait'
-    const w = isPortrait ? Math.min(pw, ph) : Math.max(pw, ph)
-    const h = isPortrait ? Math.max(pw, ph) : Math.min(pw, ph)
-    const scale = 120 / Math.max(w, h)
-    return { w: w * scale, h: h * scale, label: `${config.pageSize.toUpperCase()} ${config.orientation}` }
-  }, [config.pageSize, config.orientation])
+    const realW = isPortrait ? Math.min(pw, ph) : Math.max(pw, ph)
+    const realH = isPortrait ? Math.max(pw, ph) : Math.min(pw, ph)
+    const scale = MAX_H / realH
+    const w = realW * scale
+    const h = realH * scale
+
+    const firstUrl = previewUrls.get(pages[0]?.id || '')
+    // Margin in preview pixels (scale real margin by the same factor)
+    const marginPx = config.margin * scale
+
+    return { w, h, label, showImage: !!firstUrl, imageUrl: firstUrl || null, imageRotation: pages[0]?.rotation || 0, marginPx, realW, realH, scale }
+  }, [config.pageSize, config.orientation, config.margin, pages, previewUrls])
 
   return (
     <div className="space-y-5">
@@ -211,29 +241,64 @@ export function ImagesToPdfView({ files, config, onConfigChange, onRemove, onAdd
           </div>
         </div>
 
-        {/* Page layout preview */}
-        <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-card p-3">
-          <span className="text-xs font-medium text-muted-foreground">Page preview:</span>
-          <div className="flex items-center gap-2">
-            <div
-              className="relative rounded border-2 border-primary/40 bg-white shadow-sm"
-              style={{ width: previewDims.w, height: previewDims.h }}
-            >
-              {/* Margin indicator */}
-              {config.margin > 0 && config.pageSize !== 'fit' && (
-                <div
-                  className="absolute border border-dashed border-primary/30"
-                  style={{
-                    inset: `${(config.margin / 72) * 20}px`,
-                  }}
+        {/* Page layout preview — realistic page with image, margins, and correct proportions */}
+        <div className="flex items-center justify-center gap-4 rounded-lg border border-border/60 bg-secondary/30 p-4">
+          {/* The page */}
+          <div
+            className="relative shrink-0 overflow-hidden rounded-sm bg-white shadow-md ring-1 ring-black/5 transition-all duration-300"
+            style={{ width: previewData.w, height: previewData.h }}
+          >
+            {/* Margin area (dashed border) */}
+            {config.pageSize !== 'fit' && config.margin > 0 && (
+              <div
+                className="absolute border border-dashed border-primary/30"
+                style={{
+                  top: previewData.marginPx,
+                  right: previewData.marginPx,
+                  bottom: previewData.marginPx,
+                  left: previewData.marginPx,
+                }}
+              />
+            )}
+            {/* Image inside the page */}
+            {previewData.showImage ? (
+              <div
+                className="absolute flex items-center justify-center overflow-hidden"
+                style={{
+                  top: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  right: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  bottom: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  left: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                }}
+              >
+                <img
+                  src={previewData.imageUrl!}
+                  alt="Preview"
+                  className="max-h-full max-w-full object-contain transition-transform duration-300"
+                  style={{ transform: `rotate(${previewData.imageRotation}deg)` }}
                 />
-              )}
-              {/* Image placeholder */}
-              <div className="absolute inset-2 flex items-center justify-center">
-                <Maximize className="h-4 w-4 text-primary/30" />
               </div>
-            </div>
-            <span className="text-xs text-muted-foreground">{previewDims.label}</span>
+            ) : (
+              <div
+                className="absolute flex items-center justify-center"
+                style={{
+                  top: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  right: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  bottom: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                  left: config.pageSize === 'fit' ? 0 : (previewData.marginPx || 2),
+                }}
+              >
+                <Maximize className="h-5 w-5 text-primary/20" />
+              </div>
+            )}
+          </div>
+          {/* Label */}
+          <div className="flex flex-col gap-1">
+            <span className="text-sm font-medium">{previewData.label}</span>
+            {config.pageSize !== 'fit' && config.margin > 0 && (
+              <span className="text-xs text-muted-foreground">{config.margin}pt margin</span>
+            )}
+            <span className="text-xs text-muted-foreground">Live preview</span>
           </div>
         </div>
       </div>
