@@ -222,13 +222,14 @@ function parseSheetWithStyles(ws: any, XLSX: any, cellXfs: CellStyle[], cellStyl
       if (r !== m.s.r || c !== m.s.c) mergeMap[`${r},${c}`] = { rs: 0, cs: 0, hidden: true }
   }
 
+  // Start with XLSX-specified widths/heights, or defaults
   const colWidths: number[] = []
   for (let c = range.s.c; c <= range.e.c; c++) {
-    const col = cols[c]; colWidths.push(col && col.wpx ? col.wpx : 90)
+    const col = cols[c]; colWidths.push(col && col.wpx ? col.wpx : 0) // 0 = auto-size
   }
   const rowHeights: number[] = []
   for (let r = range.s.r; r <= range.e.r; r++) {
-    const row = rows[r]; rowHeights.push(row && row.hpt ? Math.round(row.hpt * 1.333) : 22)
+    const row = rows[r]; rowHeights.push(row && row.hpt ? Math.round(row.hpt * 1.333) : 0) // 0 = auto-size
   }
 
   const cells: CellInfo[][] = []
@@ -240,7 +241,6 @@ function parseSheetWithStyles(ws: any, XLSX: any, cellXfs: CellStyle[], cellStyl
       const merge = mergeMap[`${r},${c}`]
       if (merge && merge.hidden) { rowCells.push({ text: '', style: DEF, rowspan: 0, colspan: 0, hidden: true }); continue }
 
-      // Get style from our XML-parsed style map (not SheetJS's cell.s)
       let style = DEF
       const styleIdx = cellStyleMap.get(cellAddr)
       if (styleIdx !== undefined && cellXfs[styleIdx]) {
@@ -249,7 +249,6 @@ function parseSheetWithStyles(ws: any, XLSX: any, cellXfs: CellStyle[], cellStyl
         style = cellXfs[cell.s]
       }
 
-      // Smart alignment defaults
       if (cell && styleIdx === undefined) {
         if (cell.t === 'n') style = { ...style, align: 'right' }
         else if (cell.t === 'b') style = { ...style, align: 'center' }
@@ -265,6 +264,78 @@ function parseSheetWithStyles(ws: any, XLSX: any, cellXfs: CellStyle[], cellStyl
     }
     cells.push(rowCells)
   }
+
+  // ── AUTO-SIZE columns and rows based on actual text content ──
+  // Create a temp canvas context for measuring text
+  const measureCanvas = document.createElement('canvas')
+  const measureCtx = measureCanvas.getContext('2d')!
+  const PADDING = 10 // 5px padding each side
+  const MIN_COL_W = 40
+  const MAX_COL_W = 300
+  const DEFAULT_ROW_H = 22
+  const MIN_ROW_H = 18
+
+  for (let c = 0; c < colWidths.length; c++) {
+    if (colWidths[c] > 0) continue // Already has a width from XLSX
+    // Auto-size: find the widest text in this column
+    let maxW = MIN_COL_W
+    for (let r = 0; r < cells.length; r++) {
+      const cell = cells[r][c]
+      if (cell.hidden || !cell.text) continue
+      // Account for merged cells — only measure if this is the start of a merge
+      // or a non-merged cell
+      if (cell.colspan > 1) continue // Merged cell width spans multiple columns
+      measureCtx.font = `${cell.style.bold ? 'bold ' : ''}${cell.style.italic ? 'italic ' : ''}${cell.style.fontSize}px ${cell.style.fontName}, Arial, sans-serif`
+      const w = measureCtx.measureText(cell.text).width + PADDING
+      if (w > maxW) maxW = w
+    }
+    colWidths[c] = Math.min(maxW, MAX_COL_W)
+  }
+
+  // Auto-size rows: calculate how many lines each cell needs (based on column
+  // width and text length), then set the row height to fit the tallest cell
+  for (let r = 0; r < rowHeights.length; r++) {
+    if (rowHeights[r] > 0) continue // Already has a height from XLSX
+    let maxLines = 1
+    for (let c = 0; c < cells[r].length; c++) {
+      const cell = cells[r][c]
+      if (cell.hidden || !cell.text) continue
+      // Calculate the available width for this cell
+      let availW = 0
+      for (let ci = c; ci < c + cell.colspan; ci++) availW += colWidths[ci] || 90
+      availW -= PADDING
+      if (availW <= 0) availW = 80
+
+      measureCtx.font = `${cell.style.bold ? 'bold ' : ''}${cell.style.italic ? 'italic ' : ''}${cell.style.fontSize}px ${cell.style.fontName}, Arial, sans-serif`
+      const textW = measureCtx.measureText(cell.text).width
+
+      // If text is wider than available, it will wrap — estimate line count
+      if (textW > availW) {
+        // Word-wrap estimate
+        const words = cell.text.split(/\s+/)
+        let lines = 1, currentLineW = 0
+        for (const word of words) {
+          const wordW = measureCtx.measureText(word).width
+          if (currentLineW + wordW > availW && currentLineW > 0) {
+            lines++; currentLineW = wordW
+          } else {
+            currentLineW += wordW + measureCtx.measureText(' ').width
+          }
+        }
+        // Also check for character wrapping of long words
+        for (const word of words) {
+          const wordW = measureCtx.measureText(word).width
+          if (wordW > availW) {
+            lines += Math.ceil(wordW / availW) - 1
+          }
+        }
+        if (lines > maxLines) maxLines = lines
+      }
+    }
+    const lineHeight = 18 // approximate line height
+    rowHeights[r] = Math.max(MIN_ROW_H, maxLines * lineHeight + 6)
+  }
+
   return { cells, colWidths, rowHeights, name: '' }
 }
 
@@ -346,7 +417,6 @@ function drawSheet(ctx: CanvasRenderingContext2D, sheet: { cells: CellInfo[][]; 
           else startY = y + (h - lines.length * lh) / 2 + lh / 2
 
           ctx.textBaseline = 'middle'
-          ctx.save(); ctx.beginPath(); ctx.rect(x + 1, y + 1, w - 2, h - 2); ctx.clip()
           for (let li = 0; li < lines.length; li++) {
             let tx = x + pad
             if (s.align === 'center') { ctx.textAlign = 'center'; tx = x + w / 2 }
@@ -354,7 +424,6 @@ function drawSheet(ctx: CanvasRenderingContext2D, sheet: { cells: CellInfo[][]; 
             else ctx.textAlign = 'left'
             ctx.fillText(lines[li], tx, startY + li * lh)
           }
-          ctx.restore()
         } else {
           ctx.textBaseline = 'middle'
           let tx = x + pad
@@ -364,9 +433,7 @@ function drawSheet(ctx: CanvasRenderingContext2D, sheet: { cells: CellInfo[][]; 
           let ty = y + h / 2
           if (s.valign === 'top') ty = y + s.fontSize * 0.7 + 2
           else if (s.valign === 'bottom') ty = y + h - s.fontSize * 0.5 - 2
-          ctx.save(); ctx.beginPath(); ctx.rect(x + 1, y + 1, w - 2, h - 2); ctx.clip()
           ctx.fillText(cell.text, tx, ty)
-          ctx.restore()
         }
       }
     }
