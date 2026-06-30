@@ -190,7 +190,27 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let runOptions = options
     let actualProcessor = processor
 
-    if (cfg.mode === 'text') {
+    if (isHtmlToPdf) {
+      // HTML to PDF: send HTML to worker's html-to-pdf processor with options
+      const htmlContent = htmlConfig.html.trim()
+      if (!htmlContent) {
+        toast.error('Please provide HTML content first.')
+        return
+      }
+      const encoded = new TextEncoder().encode(htmlContent)
+      const data = encoded.buffer.slice(0) as ArrayBuffer
+      inputs.push({ fileName: 'input.html', data, size: data.byteLength })
+      actualProcessor = 'html-to-pdf'
+      runOptions = {
+        ...options,
+        orientation: htmlConfig.orientation,
+        pageSize: htmlConfig.pageSize,
+        margin: htmlConfig.margin,
+        onePage: htmlConfig.onePage,
+      }
+      mode = 'single'
+      singleLabel = 'HTML → PDF output'
+    } else if (cfg.mode === 'text') {
       const data = new TextEncoder().encode(html).buffer as ArrayBuffer
       inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
       mode = 'single'
@@ -271,28 +291,6 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
       mode = 'single'
       singleLabel = 'Excel → PDF output'
-    } else if (isHtmlToPdf) {
-      // HTML to PDF: send HTML to worker's html-to-pdf processor with options
-      const htmlContent = htmlConfig.html.trim()
-      console.log('[tool-page] HTML to PDF — htmlConfig.html length:', htmlConfig.html.length, 'trimmed:', htmlContent.length)
-      if (!htmlContent) {
-        toast.error('Please provide HTML content first.')
-        return
-      }
-      const encoded = new TextEncoder().encode(htmlContent)
-      const data = encoded.buffer.slice(0) as ArrayBuffer
-      console.log('[tool-page] Sending to worker — buffer size:', data.byteLength)
-      inputs.push({ fileName: 'input.html', data, size: data.byteLength })
-      actualProcessor = 'html-to-pdf'
-      runOptions = {
-        ...options,
-        orientation: htmlConfig.orientation,
-        pageSize: htmlConfig.pageSize,
-        margin: htmlConfig.margin,
-        onePage: htmlConfig.onePage,
-      }
-      mode = 'single'
-      singleLabel = 'HTML → PDF output'
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
