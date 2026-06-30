@@ -72,6 +72,9 @@ export function useProcessing(concurrency?: number): UseProcessingReturn {
                 : it
             )
           ),
+        onLog: (id, message) => {
+          console.log(`[worker:${id}] ${message}`)
+        },
       }
       const pool = new WorkerPool(callbacks, concurrency)
       poolRef.current = pool

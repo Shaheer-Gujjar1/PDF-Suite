@@ -905,7 +905,8 @@ processors['html-to-pdf'] = async function (inputs, opts, onProgress, log) {
   for (var i = 0; i < inputs.length; i++) {
     html += new TextDecoder().decode(new Uint8Array(inputs[i].data));
   }
-  log('Parsing HTML');
+  log('Parsing HTML (' + html.length + ' chars)');
+  console.log('[html-to-pdf] Received HTML:', html.length, 'chars, first 100:', html.slice(0, 100));
 
   /* Parse options */
   var orientation = (opts && opts.orientation) || 'portrait';
@@ -995,12 +996,14 @@ processors['html-to-pdf'] = async function (inputs, opts, onProgress, log) {
   // Note: forward slashes in regex inside a template literal must be escaped
   // as [\\/] (a character class) — \\/ would also work but [\\/] is clearer.
   var parts = html.replace(/<![^>]*>/g, '').replace(/<script[\\s\\S]*?<\\/script>/gi, '').replace(/<style[\\s\\S]*?<\\/style>/gi, '').split(/(<[^>]+>)/);
+  console.log('[html-to-pdf] Parsed parts:', parts.length, 'items');
   var bold = false, heading = 0;
+  var textDrawn = 0;
   for (var k = 0; k < parts.length; k++) {
     var part = parts[k];
     if (!part) continue;
     if (part[0] === '<') {
-      var tag = part.toLowerCase().replace(/[<\/>]/g, '').split(/\s/)[0];
+      var tag = part.toLowerCase().replace(/[<\\/>]/g, '').split(/\\s/)[0];
       if (/^h[1-3]$/.test(tag)) { heading = parseInt(tag[1]); ensureSpace(lineHeight * 1.5); y -= lineHeight * 0.5; }
       else if (tag === '/h1' || tag === '/h2' || tag === '/h3') { heading = 0; y -= lineHeight * 0.5; }
       else if (tag === 'p' || tag === 'li') { ensureSpace(lineHeight); y -= lineHeight * 0.4; }
@@ -1018,8 +1021,10 @@ processors['html-to-pdf'] = async function (inputs, opts, onProgress, log) {
       ensureSpace(size + 2);
       y -= size + 6;
       page.drawText(lines[li], { x: margin, y: y, font: f, size: size, color: lib.rgb(0.1, 0.1, 0.12) });
+      textDrawn++;
     }
   }
+  console.log('[html-to-pdf] Drew', textDrawn, 'text lines, pages:', doc.getPageCount());
   var bytes = await doc.save({ useObjectStreams: true });
   onProgress(1);
   return [{ name: 'html-output.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: doc.getPageCount() + ' page(s)' }];

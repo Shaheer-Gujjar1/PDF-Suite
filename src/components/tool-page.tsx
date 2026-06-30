@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { toast } from 'sonner'
 import { PrivacyBadge } from '@/components/privacy-badge'
 import { Dropzone, type QueuedFile } from '@/components/dropzone'
 import { ProcessingPanel } from '@/components/processing-panel'
@@ -272,11 +273,15 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       singleLabel = 'Excel → PDF output'
     } else if (isHtmlToPdf) {
       // HTML to PDF: send HTML to worker's html-to-pdf processor with options
-      if (!htmlConfig.html.trim()) {
+      const htmlContent = htmlConfig.html.trim()
+      console.log('[tool-page] HTML to PDF — htmlConfig.html length:', htmlConfig.html.length, 'trimmed:', htmlContent.length)
+      if (!htmlContent) {
         toast.error('Please provide HTML content first.')
         return
       }
-      const data = new TextEncoder().encode(htmlConfig.html).buffer as ArrayBuffer
+      const encoded = new TextEncoder().encode(htmlContent)
+      const data = encoded.buffer.slice(0) as ArrayBuffer
+      console.log('[tool-page] Sending to worker — buffer size:', data.byteLength)
       inputs.push({ fileName: 'input.html', data, size: data.byteLength })
       actualProcessor = 'html-to-pdf'
       runOptions = {

@@ -146,7 +146,10 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
             <div className="space-y-2">
               <textarea
                 value={config.html}
-                onChange={(e) => onConfigChange({ ...config, html: e.target.value })}
+                onChange={(e) => {
+                  console.log('[html-to-pdf-view] textarea onChange, value length:', e.target.value.length)
+                  onConfigChange({ ...config, html: e.target.value })
+                }}
                 placeholder={'<!DOCTYPE html>\n<html>\n<head><title>My Page</title></head>\n<body>\n  <h1>Hello PDF!</h1>\n  <p>This will be rendered into a PDF.</p>\n</body>\n</html>'}
                 className="min-h-[220px] w-full resize-y rounded-xl border border-border bg-card p-4 font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
               />
