@@ -304,6 +304,80 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
       mode = 'single'
       singleLabel = 'HTML → PDF output'
+    } else if (isPdfToWord) {
+      // PDF to Word: render each page as image on MAIN THREAD (fonts work here),
+      // also extract text, then send both to worker to build DOCX with
+      // page images + invisible selectable text overlay.
+      const orderedFiles = wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
+      const { loadPdfJs } = await import('@/hooks/use-pdf')
+      const pdfjs = await loadPdfJs()
+
+      for (const qf of orderedFiles) {
+        try {
+          const buf = await qf.file.arrayBuffer()
+          const pdfDoc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise
+          const pageCount = pdfDoc.numPages
+
+          for (let p = 1; p <= pageCount; p++) {
+            const page = await pdfDoc.getPage(p)
+            const viewport = page.getViewport({ scale: 2.0 })
+
+            // Render page to canvas (main thread — fonts work correctly)
+            const canvas = document.createElement('canvas')
+            canvas.width = Math.ceil(viewport.width)
+            canvas.height = Math.ceil(viewport.height)
+            const ctx = canvas.getContext('2d')!
+            ctx.fillStyle = '#ffffff'
+            ctx.fillRect(0, 0, canvas.width, canvas.height)
+            await page.render({ canvasContext: ctx, viewport }).promise
+
+            // Convert to JPEG
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
+            const base64 = dataUrl.split(',')[1]
+            const binary = atob(base64)
+            const arr = new Uint8Array(binary.length)
+            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+            inputs.push({
+              fileName: `page-${p}.jpg`,
+              data: arr.buffer.slice(0),
+              size: arr.buffer.byteLength,
+            })
+
+            // Extract text for this page (for selectable text overlay)
+            const textContent = await page.getTextContent()
+            const textItems = textContent.items.map((item: any) => ({
+              str: item.str || '',
+              x: item.transform[4],
+              y: item.transform[5],
+              w: item.width || 0,
+              h: item.height || 10,
+              fontSize: Math.sqrt(item.transform[0] * item.transform[0] + item.transform[1] * item.transform[1]),
+            })).filter((item: any) => item.str.trim())
+
+            // Send text as a separate "text" input with special filename
+            if (textItems.length > 0) {
+              const textJson = JSON.stringify({ page: p, items: textItems, pageWidth: viewport.width, pageHeight: viewport.height })
+              const textEncoded = new TextEncoder().encode(textJson)
+              inputs.push({
+                fileName: `__text_${p}__.json`,
+                data: textEncoded.buffer.slice(0),
+                size: textEncoded.buffer.byteLength,
+              })
+            }
+
+            try { await page.cleanup() } catch (_) {}
+          }
+          try { await pdfDoc.destroy() } catch (_) {}
+        } catch (e) {
+          console.error('PDF render failed, sending raw to worker:', e)
+          const data = await qf.file.arrayBuffer()
+          inputs.push({ fileName: qf.file.name, data, size: data.byteLength })
+        }
+      }
+      actualProcessor = 'pdf-to-word'
+      runOptions = { ...options, _mainThreadRendered: true }
+      mode = 'single'
+      singleLabel = 'PDF → Word output'
     } else if (isWordToPdf) {
       // Word to PDF: pre-render DOCX to page images on the main thread
       // (using mammoth + html2canvas), then send images to the worker

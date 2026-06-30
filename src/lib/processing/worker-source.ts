@@ -1156,72 +1156,89 @@ async function extractTextPages(data, scale) {
 
 processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
   var docxLib = await getDocx();
-  var pdfjs = await loadPdfJs();
   var out = [];
 
-  for (var i = 0; i < inputs.length; i++) {
-    log('Converting ' + inputs[i].fileName + ' to Word (visual copy)');
-    console.log('[pdf-to-word] Processing ' + inputs[i].fileName);
+  /* Check if inputs are pre-rendered images (from main thread) or raw PDFs */
+  var hasImages = inputs.some(function (inp) { return inp.fileName.endsWith('.jpg') || inp.fileName.endsWith('.png'); });
+  var mainThreadRendered = !!(opts && opts._mainThreadRendered) || hasImages;
 
-    /* Render each PDF page as an image using pdf.js, then embed in DOCX */
-    var dataCopy = inputs[i].data.slice(0);
-    var pdfDoc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
-    var pageCount = pdfDoc.numPages;
-    console.log('[pdf-to-word] PDF has ' + pageCount + ' pages');
+  if (mainThreadRendered) {
+    /* Main thread already rendered pages as images + extracted text */
+    /* Group inputs by page: page-N.jpg + __text_N__.json */
+    var pageImages = [];
+    var pageTexts = {};
+
+    for (var i = 0; i < inputs.length; i++) {
+      if (inputs[i].fileName.match(/^page-[0-9]+\.(jpg|png)$/)) {
+        pageImages.push(inputs[i]);
+      } else if (inputs[i].fileName.match(/^__text_[0-9]+__\.json$/)) {
+        var textJson = new TextDecoder().decode(new Uint8Array(inputs[i].data));
+        try {
+          var textData = JSON.parse(textJson);
+          pageTexts[textData.page] = textData;
+        } catch (_) {}
+      }
+    }
+
+    console.log('[pdf-to-word] Pre-rendered mode: ' + pageImages.length + ' page images, ' + Object.keys(pageTexts).length + ' text pages');
 
     var children = [];
-    for (var p = 1; p <= pageCount; p++) {
-      var page = await pdfDoc.getPage(p);
-      var viewport = page.getViewport({ scale: 2.0 });
+    for (var pi = 0; pi < pageImages.length; pi++) {
+      var pageNum = pi + 1;
+      var imgData = new Uint8Array(pageImages[pi].data);
 
-      /* Render page to canvas */
-      var canvas = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-      var ctx = canvas.getContext('2d');
-      if (!ctx) continue;
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
-
-      /* Convert to PNG buffer */
-      var pngBlob = await canvas.convertToBlob({ type: 'image/png' });
-      var pngArr = new Uint8Array(await pngBlob.arrayBuffer());
-
-      /* Calculate page size in EMUs (English Metric Units: 1 inch = 914400 EMU) */
-      /* PDF points: 1pt = 12700 EMU */
-      var pageWidthEMU = Math.round(page.getViewport({ scale: 1 }).width * 12700);
-      var pageHeightEMU = Math.round(page.getViewport({ scale: 1 }).height * 12700);
-
-      /* Add image as a full-page paragraph */
-      var imgPara = new docxLib.Paragraph({
+      /* Add the page image as a full-page paragraph */
+      children.push(new docxLib.Paragraph({
         children: [new docxLib.ImageRun({
-          data: pngArr,
-          transformation: {
-            width: Math.round(page.getViewport({ scale: 1 }).width * 96 / 72),
-            height: Math.round(page.getViewport({ scale: 1 }).height * 96 / 72),
-          },
+          data: imgData,
+          transformation: { width: 595, height: 842 },
         })],
         spacing: { before: 0, after: 0 },
-      });
-      children.push(imgPara);
+      }));
 
-      /* Page break between pages (except last) */
-      if (p < pageCount) {
+      /* Add invisible selectable text after the image */
+      var textData = pageTexts[pageNum];
+      if (textData && textData.items && textData.items.length > 0) {
+        /* Group text items into lines and add as invisible paragraphs */
+        var lines = {};
+        for (var ti = 0; ti < textData.items.length; ti++) {
+          var item = textData.items[ti];
+          var yKey = Math.round(item.y);
+          if (!lines[yKey]) lines[yKey] = [];
+          lines[yKey].push({ x: item.x, text: item.str });
+        }
+        var sortedYs = Object.keys(lines).map(Number).sort(function (a, b) { return b - a; });
+        for (var ly = 0; ly < sortedYs.length; ly++) {
+          var lineItems = lines[sortedYs[ly]].sort(function (a, b) { return a.x - b.x; });
+          var lineText = lineItems.map(function (it) { return it.text; }).join('').trim();
+          if (lineText) {
+            /* Invisible text: white color, 1pt font, hidden */
+            children.push(new docxLib.Paragraph({
+              children: [new docxLib.TextRun({
+                text: lineText,
+                color: 'FFFFFF',
+                size: 1,
+              })],
+              spacing: { before: 0, after: 0, line: 1 },
+            }));
+          }
+        }
+      }
+
+      /* Page break between pages */
+      if (pi < pageImages.length - 1) {
         children.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
       }
 
-      try { await page.cleanup(); } catch (_) {}
-      onProgress((i + (p / pageCount)) / inputs.length);
-      log('Rendered page ' + p + '/' + pageCount);
+      onProgress((pi + 1) / pageImages.length);
+      log('Building page ' + pageNum + '/' + pageImages.length);
     }
 
-    try { await pdfDoc.destroy(); } catch (_) {}
-
-    /* Create DOCX — use A4 default page size, images fill the page */
     var d = new docxLib.Document({
       sections: [{
         properties: {
           page: {
-            size: { width: 11906, height: 16838 }, /* A4 in twips (1/20 pt) */
+            size: { width: 11906, height: 16838 },
             margin: { top: 0, bottom: 0, left: 0, right: 0 },
           },
         },
@@ -1231,15 +1248,57 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
 
     var blob = await docxLib.Packer.toBlob(d);
     var arr = new Uint8Array(await blob.arrayBuffer());
-    console.log('[pdf-to-word] DOCX generated: ' + arr.length + ' bytes, ' + pageCount + ' pages');
+    console.log('[pdf-to-word] DOCX generated: ' + arr.length + ' bytes');
     out.push({
-      name: stripExt(inputs[i].fileName) + '.docx',
+      name: 'converted.docx',
       data: toArrayBuffer(arr),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      note: pageCount + ' page(s) — exact visual copy',
+      note: pageImages.length + ' page(s) — visual copy with selectable text',
     });
-    onProgress((i + 1) / inputs.length);
+  } else {
+    /* Fallback: raw PDF input — render in worker (may have font issues) */
+    var pdfjs = await loadPdfJs();
+    for (var fi = 0; fi < inputs.length; fi++) {
+      log('Converting ' + inputs[fi].fileName + ' to Word');
+      var dataCopy = inputs[fi].data.slice(0);
+      var pdfDoc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
+      var pageCount = pdfDoc.numPages;
+      var children2 = [];
+
+      for (var p = 1; p <= pageCount; p++) {
+        var page = await pdfDoc.getPage(p);
+        var viewport = page.getViewport({ scale: 2.0 });
+        var canvas2 = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+        var ctx2 = canvas2.getContext('2d');
+        if (!ctx2) continue;
+        ctx2.fillStyle = '#ffffff';
+        ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
+        await page.render({ canvasContext: ctx2, viewport: viewport }).promise;
+        var pngBlob2 = await canvas2.convertToBlob({ type: 'image/png' });
+        var pngArr2 = new Uint8Array(await pngBlob2.arrayBuffer());
+        children2.push(new docxLib.Paragraph({
+          children: [new docxLib.ImageRun({ data: pngArr2, transformation: { width: 595, height: 842 } })],
+          spacing: { before: 0, after: 0 },
+        }));
+        if (p < pageCount) children2.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
+        try { await page.cleanup(); } catch (_) {}
+        onProgress((fi + (p / pageCount)) / inputs.length);
+      }
+      try { await pdfDoc.destroy(); } catch (_) {}
+
+      var d2 = new docxLib.Document({
+        sections: [{
+          properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 0, bottom: 0, left: 0, right: 0 } } },
+          children: children2,
+        }],
+      });
+      var blob2 = await docxLib.Packer.toBlob(d2);
+      var arr2 = new Uint8Array(await blob2.arrayBuffer());
+      out.push({ name: stripExt(inputs[fi].fileName) + '.docx', data: toArrayBuffer(arr2), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', note: pageCount + ' page(s) — visual copy' });
+      onProgress((fi + 1) / inputs.length);
+    }
   }
+
   onProgress(1);
   return out;
 };
