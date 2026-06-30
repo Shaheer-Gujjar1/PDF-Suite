@@ -271,90 +271,20 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       mode = 'single'
       singleLabel = 'Excel → PDF output'
     } else if (isHtmlToPdf) {
-      // HTML to PDF: render HTML in iframe, capture with html2canvas, send images to worker
+      // HTML to PDF: send HTML to worker's html-to-pdf processor with options
       if (!htmlConfig.html.trim()) {
         toast.error('Please provide HTML content first.')
         return
       }
-      try {
-        const SCREEN_W = htmlConfig.screenWidth === 'mobile' ? 375 : htmlConfig.screenWidth === 'tablet' ? 768 : 1280
-        const [pw, ph] = htmlConfig.pageSize === 'a4' ? [595.28, 841.89] : [612, 792]
-        const realW = htmlConfig.orientation === 'portrait' ? Math.min(pw, ph) : Math.max(pw, ph)
-        const realH = htmlConfig.orientation === 'portrait' ? Math.max(pw, ph) : Math.min(pw, ph)
-        const SCALE = 2
-
-        // Create isolated iframe
-        const iframe = document.createElement('iframe')
-        iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${SCREEN_W}px;height:${realH}px;border:none;`
-        document.body.appendChild(iframe)
-        const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
-        iframeDoc.open()
-        iframeDoc.write(htmlConfig.html)
-        iframeDoc.close()
-
-        await new Promise(r => setTimeout(r, 1000)) // Wait for render
-
-        const iframeWin = iframe.contentWindow as any
-        // Load html2canvas into iframe if needed
-        if (!iframeWin.html2canvas) {
-          const s = iframeDoc.createElement('script')
-          s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
-          iframeDoc.head.appendChild(s)
-          await new Promise(r => setTimeout(r, 300))
-        }
-        const h2c = iframeWin.html2canvas || (window as any).html2canvas
-
-        const contentH = iframeDoc.body.scrollHeight
-        const canvas = await h2c(iframeDoc.body, {
-          scale: SCALE,
-          useCORS: true,
-          backgroundColor: '#ffffff',
-          width: SCREEN_W,
-          height: contentH,
-          windowWidth: SCREEN_W,
-        })
-        document.body.removeChild(iframe)
-
-        // Split into pages
-        const pageHScaled = realH * SCALE
-        const marginScaled = htmlConfig.margin * SCALE
-        const pages: { dataUrl: string; w: number; h: number }[] = []
-
-        if (htmlConfig.onePage) {
-          // One long page — no splitting
-          pages.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.92), w: canvas.width, h: canvas.height })
-        } else {
-          let y = 0
-          while (y < canvas.height) {
-            const ph2 = Math.min(pageHScaled, canvas.height - y)
-            const pc = document.createElement('canvas')
-            pc.width = canvas.width
-            pc.height = ph2
-            const pctx = pc.getContext('2d')!
-            pctx.fillStyle = '#ffffff'
-            pctx.fillRect(0, 0, pc.width, pc.height)
-            pctx.drawImage(canvas, 0, y, canvas.width, ph2, 0, 0, canvas.width, ph2)
-            pages.push({ dataUrl: pc.toDataURL('image/jpeg', 0.92), w: canvas.width, h: ph2 })
-            y += ph2
-          }
-        }
-
-        // Convert page images to inputs for the worker
-        for (const page of pages) {
-          const base64 = page.dataUrl.split(',')[1]
-          const binary = atob(base64)
-          const arr = new Uint8Array(binary.length)
-          for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
-          inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer, size: arr.buffer.byteLength })
-        }
-        actualProcessor = 'images-to-pdf'
-        runOptions = { ...options, output: 'single', pageSize: 'fit', outputName: 'html-output' }
-      } catch (e) {
-        console.error('HTML render failed, falling back:', e)
-        const data = new TextEncoder().encode(htmlConfig.html).buffer as ArrayBuffer
-        inputs.push({ fileName: 'input.html', data, size: data.byteLength })
-        actualProcessor = 'html-to-pdf'
-        runOptions = options
+      const data = new TextEncoder().encode(htmlConfig.html).buffer as ArrayBuffer
+      inputs.push({ fileName: 'input.html', data, size: data.byteLength })
+      actualProcessor = 'html-to-pdf'
+      runOptions = {
+        ...options,
+        orientation: htmlConfig.orientation,
+        pageSize: htmlConfig.pageSize,
+        margin: htmlConfig.margin,
+        onePage: htmlConfig.onePage,
       }
       mode = 'single'
       singleLabel = 'HTML → PDF output'

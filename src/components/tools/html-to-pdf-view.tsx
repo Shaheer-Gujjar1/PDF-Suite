@@ -161,17 +161,60 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
       {/* Options + preview — shown when content exists */}
       {hasContent && (
         <>
-          {/* Live HTML preview */}
+          {/* Live HTML preview — reflects render width, orientation, margin */}
           <div className="rounded-xl border border-border/60 bg-secondary/30 p-3">
-            <p className="mb-2 text-xs font-medium text-muted-foreground">Preview:</p>
-            <div className="overflow-hidden rounded-lg border border-border bg-white" style={{ maxHeight: '300px' }}>
-              <iframe
-                srcDoc={config.html}
-                title="HTML Preview"
-                className="w-full border-0"
-                style={{ height: '300px', width: '100%' }}
-                sandbox="allow-same-origin"
-              />
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-medium text-muted-foreground">Live Preview</p>
+              <span className="text-xs text-muted-foreground">
+                {SCREEN_WIDTHS[config.screenWidth]}px · {config.orientation} · {config.pageSize === 'a4' ? 'A4' : 'Letter'} · {config.margin}pt margin
+              </span>
+            </div>
+            {/* Page frame — shows orientation + page proportions */}
+            <div className="flex justify-center">
+              <div
+                className="relative bg-white shadow-md ring-1 ring-black/5 transition-all duration-300"
+                style={{
+                  width: previewData.w * 3, // Scale up for visibility
+                  height: config.onePage ? 'auto' : previewData.h * 3,
+                  minHeight: previewData.h * 3,
+                }}
+              >
+                {/* Margin indicator */}
+                {config.margin > 0 && (
+                  <div
+                    className="absolute border border-dashed border-primary/20 pointer-events-none"
+                    style={{
+                      top: previewData.marginPx * 3,
+                      right: previewData.marginPx * 3,
+                      bottom: previewData.marginPx * 3,
+                      left: previewData.marginPx * 3,
+                    }}
+                  />
+                )}
+                {/* HTML content rendered at the selected screen width */}
+                <div
+                  className="absolute overflow-hidden"
+                  style={{
+                    top: previewData.marginPx * 3 || 4,
+                    right: previewData.marginPx * 3 || 4,
+                    bottom: previewData.marginPx * 3 || 4,
+                    left: previewData.marginPx * 3 || 4,
+                  }}
+                >
+                  <iframe
+                    srcDoc={config.html}
+                    title="HTML Preview"
+                    className="border-0"
+                    style={{
+                      width: SCREEN_WIDTHS[config.screenWidth],
+                      height: '100%',
+                      transform: `scale(${(previewData.w * 3 - (previewData.marginPx * 3 || 4) * 2) / SCREEN_WIDTHS[config.screenWidth]})`,
+                      transformOrigin: 'top left',
+                    }}
+                    sandbox="allow-same-origin"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
