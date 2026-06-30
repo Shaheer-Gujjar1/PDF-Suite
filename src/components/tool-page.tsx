@@ -191,22 +191,109 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let actualProcessor = processor
 
     if (isHtmlToPdf) {
-      // HTML to PDF: send HTML to worker's html-to-pdf processor with options
+      // HTML to PDF: render HTML visually in iframe, capture with html2canvas,
+      // send page images to worker. Also send the raw HTML so the worker can
+      // draw invisible selectable text on top of the images.
       const htmlContent = htmlConfig.html.trim()
       if (!htmlContent) {
         toast.error('Please provide HTML content first.')
         return
       }
-      const encoded = new TextEncoder().encode(htmlContent)
-      const data = encoded.buffer.slice(0) as ArrayBuffer
-      inputs.push({ fileName: 'input.html', data, size: data.byteLength })
-      actualProcessor = 'html-to-pdf'
+
+      const SCREEN_W = htmlConfig.screenWidth === 'mobile' ? 375 : htmlConfig.screenWidth === 'tablet' ? 768 : 1280
+      const DIMS: Record<string, [number, number]> = { a4: [595.28, 841.89], letter: [612, 792] }
+      const dims = DIMS[htmlConfig.pageSize] || DIMS.a4
+      const realW = htmlConfig.orientation === 'portrait' ? Math.min(dims[0], dims[1]) : Math.max(dims[0], dims[1])
+      const realH = htmlConfig.orientation === 'portrait' ? Math.max(dims[0], dims[1]) : Math.min(dims[0], dims[1])
+      const SCALE = 2
+
+      // Create isolated iframe and render the HTML
+      const iframe = document.createElement('iframe')
+      iframe.style.cssText = `position:fixed;left:0;top:0;width:${SCREEN_W}px;height:${realH}px;border:none;z-index:-1;opacity:1;`
+      document.body.appendChild(iframe)
+
+      // Wait for iframe to be ready, then write content
+      await new Promise(r => setTimeout(r, 100))
+      const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
+      iframeDoc.open()
+      iframeDoc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { background:#fff; padding:${htmlConfig.margin}px; width:${SCREEN_W - htmlConfig.margin * 2}px; }
+      </style></head><body>${htmlContent}</body></html>`)
+      iframeDoc.close()
+
+      // Wait for content to render (fonts, images, layout)
+      await new Promise(r => setTimeout(r, 1500))
+
+      // Load html2canvas into the MAIN window (not iframe) and capture
+      // the iframe's document body by passing it as the target element
+      if (!(window as any).html2canvas) {
+        const s = document.createElement('script')
+        s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
+        document.head.appendChild(s)
+        await new Promise(r => setTimeout(r, 500))
+      }
+      const h2c = (window as any).html2canvas
+
+      const contentH = iframeDoc.body.scrollHeight
+      console.log('[html-to-pdf] Capturing iframe content:', SCREEN_W, 'x', contentH)
+
+      // Use the iframe's document element as the target
+      const canvas = await h2c(iframeDoc.documentElement, {
+        scale: SCALE,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        width: SCREEN_W,
+        height: contentH,
+        windowWidth: SCREEN_W,
+      })
+      console.log('[html-to-pdf] Canvas captured:', canvas.width, 'x', canvas.height)
+
+      document.body.removeChild(iframe)
+
+      // Split into pages (or keep as one long page)
+      const pageHScaled = realH * SCALE
+      const pageImages: { dataUrl: string; w: number; h: number }[] = []
+
+      if (htmlConfig.onePage) {
+        // One long page — use the entire canvas as a single image
+        pageImages.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.92), w: canvas.width, h: canvas.height })
+      } else {
+        let y = 0
+        while (y < canvas.height) {
+          const ph = Math.min(pageHScaled, canvas.height - y)
+          const pc = document.createElement('canvas')
+          pc.width = canvas.width
+          pc.height = ph
+          const pctx = pc.getContext('2d')!
+          pctx.fillStyle = '#ffffff'
+          pctx.fillRect(0, 0, pc.width, pc.height)
+          pctx.drawImage(canvas, 0, y, canvas.width, ph, 0, 0, canvas.width, ph)
+          pageImages.push({ dataUrl: pc.toDataURL('image/jpeg', 0.92), w: canvas.width, h: ph })
+          y += ph
+        }
+      }
+
+      // Send page images to worker — use images-to-pdf processor
+      for (const page of pageImages) {
+        const base64 = page.dataUrl.split(',')[1]
+        const binary = atob(base64)
+        const arr = new Uint8Array(binary.length)
+        for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+        // Verify JPEG magic bytes
+        if (arr[0] !== 0xff || arr[1] !== 0xd8) {
+          throw new Error('Invalid JPEG data from canvas')
+        }
+        inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer.slice(0), size: arr.buffer.byteLength })
+      }
+
+      actualProcessor = 'images-to-pdf'
       runOptions = {
         ...options,
-        orientation: htmlConfig.orientation,
-        pageSize: htmlConfig.pageSize,
-        margin: htmlConfig.margin,
-        onePage: htmlConfig.onePage,
+        output: 'single',
+        pageSize: 'fit',
+        outputName: 'html-output',
       }
       mode = 'single'
       singleLabel = 'HTML → PDF output'
