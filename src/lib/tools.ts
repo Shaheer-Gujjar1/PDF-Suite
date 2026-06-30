@@ -233,6 +233,7 @@ export const tools: Tool[] = [
     accent: "emerald",
     batch: false,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   // ---------- Convert from PDF ----------

@@ -1124,11 +1124,14 @@ async function extractTextPages(data, scale) {
   var pdfjs;
   try { pdfjs = await loadPdfJs(); }
   catch (e) { throw new Error('Could not load PDF text engine: ' + (e.message || e)); }
-  var doc = await pdfjs.getDocument({ data: new Uint8Array(data), useWorkerFetch: false, isEvalSupported: false }).promise;
+  /* Copy the data — pdf.js transfers/detaches the ArrayBuffer internally */
+  var dataCopy = data.slice(0);
+  var doc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
   var pages = [];
   for (var p = 1; p <= doc.numPages; p++) {
     var page = await doc.getPage(p);
     var content = await page.getTextContent();
+    console.log('[pdf-to-word] Page ' + p + ': ' + content.items.length + ' text items');
     // Group items into lines by rounded y, then sort by x.
     var lines = {};
     for (var i = 0; i < content.items.length; i++) {
@@ -1156,19 +1159,30 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Extracting text from ' + inputs[i].fileName);
+    console.log('[pdf-to-word] Processing ' + inputs[i].fileName + ', data size: ' + inputs[i].data.byteLength);
     var pages = await extractTextPages(inputs[i].data);
+    console.log('[pdf-to-word] Extracted ' + pages.length + ' pages');
+    var totalLines = pages.reduce(function (a, p) { return a + p.length; }, 0);
+    console.log('[pdf-to-word] Total text lines: ' + totalLines);
+
     var children = [];
-    for (var p = 0; p < pages.length; p++) {
-      children.push(new docxLib.Paragraph({ text: 'Page ' + (p + 1), heading: docxLib.HeadingLevel.HEADING_2 }));
-      for (var l = 0; l < pages[p].length; l++) {
-        children.push(new docxLib.Paragraph({ children: [new docxLib.TextRun({ text: pages[p][l] })] }));
+    if (totalLines === 0) {
+      // No text found — add a note
+      children.push(new docxLib.Paragraph({ text: 'No selectable text was found in this PDF. The PDF may contain only images or scanned content.' }));
+    } else {
+      for (var p = 0; p < pages.length; p++) {
+        children.push(new docxLib.Paragraph({ text: 'Page ' + (p + 1), heading: docxLib.HeadingLevel.HEADING_2 }));
+        for (var l = 0; l < pages[p].length; l++) {
+          children.push(new docxLib.Paragraph({ children: [new docxLib.TextRun({ text: pages[p][l] })] }));
+        }
+        if (p < pages.length - 1) children.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
       }
-      if (p < pages.length - 1) children.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
     }
+
     var d = new docxLib.Document({ sections: [{ properties: {}, children: children }] });
     var blob = await docxLib.Packer.toBlob(d);
     var arr = new Uint8Array(await blob.arrayBuffer());
-    var totalLines = pages.reduce(function (a, p) { return a + p.length; }, 0);
+    console.log('[pdf-to-word] DOCX generated: ' + arr.length + ' bytes');
     out.push({ name: stripExt(inputs[i].fileName) + '.docx', data: toArrayBuffer(arr), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', note: pages.length + ' pages, ' + totalLines + ' lines' });
     onProgress((i + 1) / inputs.length);
   }

@@ -30,6 +30,7 @@ import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/imag
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
+import { PdfToWordView, type PdfFile } from '@/components/tools/pdf-to-word-view'
 import { renderDocxToPages } from '@/lib/docx-renderer'
 import { renderXlsxToPages } from '@/lib/xlsx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
@@ -103,6 +104,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isWordToPdf = tool.id === 'word-to-pdf'
   const isExcelToPdf = tool.id === 'excel-to-pdf'
   const isHtmlToPdf = tool.id === 'html-to-pdf'
+  const isPdfToWord = tool.id === 'pdf-to-word'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -139,9 +141,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setHtmlConfig({ html: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
   }, [tool.id])
 
-  // Sync mergeOrder/wordOrder when files change (add new files to the end)
+  // Sync mergeOrder/wordOrder/pdfToWordOrder when files change
   React.useEffect(() => {
-    if (isMerge || isWordToPdf) {
+    if (isMerge || isWordToPdf || isPdfToWord) {
       const fileIds = new Set(files.map((f) => f.id))
       const setter = isMerge ? setMergeOrder : setWordOrder
       setter((prev) => {
@@ -150,7 +152,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         return [...kept, ...newIds]
       })
     }
-  }, [files, isMerge, isWordToPdf])
+  }, [files, isMerge, isWordToPdf, isPdfToWord])
 
   // Ordered merge files
   const mergeFiles: MergeFile[] = isMerge
@@ -160,8 +162,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         .map((f) => ({ id: f.id, file: f.file }))
     : []
 
-  // Ordered word files
-  const wordFiles: WordFile[] = isWordToPdf
+  // Ordered word/pdf-to-word files
+  const wordFiles: WordFile[] = (isWordToPdf || isPdfToWord)
     ? wordOrder
         .map((id) => files.find((f) => f.id === id))
         .filter((f): f is QueuedFile => !!f)
@@ -591,6 +593,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onRemove={handleWordRemove}
             onAddMore={handleAddMore}
           />
+        ) : isPdfToWord && files.length > 0 ? (
+          <PdfToWordView
+            files={wordFiles}
+            onReorder={handleWordReorder}
+            onRemove={handleWordRemove}
+          />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
             toolId={tool.id}
@@ -630,7 +638,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isPdfToWord && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}
