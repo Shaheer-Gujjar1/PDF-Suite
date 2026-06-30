@@ -28,6 +28,7 @@ import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
 import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/images-to-pdf-view'
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
+import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
 import { renderDocxToPages } from '@/lib/docx-renderer'
 import { renderXlsxToPages } from '@/lib/xlsx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
@@ -100,6 +101,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isPdfToImages = tool.id === 'pdf-to-images'
   const isWordToPdf = tool.id === 'word-to-pdf'
   const isExcelToPdf = tool.id === 'excel-to-pdf'
+  const isHtmlToPdf = tool.id === 'html-to-pdf'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -107,6 +109,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   })
   const [pdfToImagesConfig, setPdfToImagesConfig] = React.useState<PdfToImagesConfig>({
     mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2,
+  })
+  const [htmlConfig, setHtmlConfig] = React.useState<HtmlToPdfConfig>({
+    source: 'file', html: '', url: '', orientation: 'portrait', pageSize: 'a4',
+    screenWidth: 'desktop', onePage: false, margin: 0,
   })
 
   const processing = useProcessing()
@@ -129,6 +135,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setRotateConfig({ angle: 90 })
     setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
     setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
+    setHtmlConfig({ source: 'file', html: '', url: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
   }, [tool.id])
 
   // Sync mergeOrder/wordOrder when files change (add new files to the end)
@@ -161,9 +168,11 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     : []
 
   const canProcess =
-    cfg.mode === 'files'
-      ? files.length > 0
-      : html.trim().length > 0
+    isHtmlToPdf
+      ? htmlConfig.html.trim().length > 0
+      : cfg.mode === 'files'
+        ? files.length > 0
+        : html.trim().length > 0
 
   const needsPassword = tool.id === 'protect'
   const hasPassword = String(options.password ?? '').length > 0
@@ -261,6 +270,94 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
       mode = 'single'
       singleLabel = 'Excel → PDF output'
+    } else if (isHtmlToPdf) {
+      // HTML to PDF: render HTML in iframe, capture with html2canvas, send images to worker
+      if (!htmlConfig.html.trim()) {
+        toast.error('Please provide HTML content first.')
+        return
+      }
+      try {
+        const SCREEN_W = htmlConfig.screenWidth === 'mobile' ? 375 : htmlConfig.screenWidth === 'tablet' ? 768 : 1280
+        const [pw, ph] = htmlConfig.pageSize === 'a4' ? [595.28, 841.89] : [612, 792]
+        const realW = htmlConfig.orientation === 'portrait' ? Math.min(pw, ph) : Math.max(pw, ph)
+        const realH = htmlConfig.orientation === 'portrait' ? Math.max(pw, ph) : Math.min(pw, ph)
+        const SCALE = 2
+
+        // Create isolated iframe
+        const iframe = document.createElement('iframe')
+        iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${SCREEN_W}px;height:${realH}px;border:none;`
+        document.body.appendChild(iframe)
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
+        iframeDoc.open()
+        iframeDoc.write(htmlConfig.html)
+        iframeDoc.close()
+
+        await new Promise(r => setTimeout(r, 1000)) // Wait for render
+
+        const iframeWin = iframe.contentWindow as any
+        // Load html2canvas into iframe if needed
+        if (!iframeWin.html2canvas) {
+          const s = iframeDoc.createElement('script')
+          s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
+          iframeDoc.head.appendChild(s)
+          await new Promise(r => setTimeout(r, 300))
+        }
+        const h2c = iframeWin.html2canvas || (window as any).html2canvas
+
+        const contentH = iframeDoc.body.scrollHeight
+        const canvas = await h2c(iframeDoc.body, {
+          scale: SCALE,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          width: SCREEN_W,
+          height: contentH,
+          windowWidth: SCREEN_W,
+        })
+        document.body.removeChild(iframe)
+
+        // Split into pages
+        const pageHScaled = realH * SCALE
+        const marginScaled = htmlConfig.margin * SCALE
+        const pages: { dataUrl: string; w: number; h: number }[] = []
+
+        if (htmlConfig.onePage) {
+          // One long page — no splitting
+          pages.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.92), w: canvas.width, h: canvas.height })
+        } else {
+          let y = 0
+          while (y < canvas.height) {
+            const ph2 = Math.min(pageHScaled, canvas.height - y)
+            const pc = document.createElement('canvas')
+            pc.width = canvas.width
+            pc.height = ph2
+            const pctx = pc.getContext('2d')!
+            pctx.fillStyle = '#ffffff'
+            pctx.fillRect(0, 0, pc.width, pc.height)
+            pctx.drawImage(canvas, 0, y, canvas.width, ph2, 0, 0, canvas.width, ph2)
+            pages.push({ dataUrl: pc.toDataURL('image/jpeg', 0.92), w: canvas.width, h: ph2 })
+            y += ph2
+          }
+        }
+
+        // Convert page images to inputs for the worker
+        for (const page of pages) {
+          const base64 = page.dataUrl.split(',')[1]
+          const binary = atob(base64)
+          const arr = new Uint8Array(binary.length)
+          for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+          inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer, size: arr.buffer.byteLength })
+        }
+        actualProcessor = 'images-to-pdf'
+        runOptions = { ...options, output: 'single', pageSize: 'fit', outputName: 'html-output' }
+      } catch (e) {
+        console.error('HTML render failed, falling back:', e)
+        const data = new TextEncoder().encode(htmlConfig.html).buffer as ArrayBuffer
+        inputs.push({ fileName: 'input.html', data, size: data.byteLength })
+        actualProcessor = 'html-to-pdf'
+        runOptions = options
+      }
+      mode = 'single'
+      singleLabel = 'HTML → PDF output'
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
@@ -481,6 +578,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onResultChange={setInteractiveResult}
             onRemoveFile={() => setFiles([])}
           />
+        ) : isHtmlToPdf ? (
+          <HtmlToPdfView
+            config={htmlConfig}
+            onConfigChange={setHtmlConfig}
+            onRemoveFile={() => setHtmlConfig({ ...htmlConfig, html: '', url: '', source: 'file' })}
+          />
         ) : cfg.mode === 'files' ? (
           <Dropzone
             files={files}
@@ -507,7 +610,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}

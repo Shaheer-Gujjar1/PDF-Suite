@@ -222,6 +222,7 @@ export const tools: Tool[] = [
     accent: "emerald",
     batch: true,
     step: 5,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "html-to-pdf",
