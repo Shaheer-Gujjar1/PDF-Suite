@@ -89,6 +89,7 @@ export class WorkerPool {
       worker.onmessage = (e: MessageEvent<WorkerMessage>) =>
         this.handleMessage(e.data, idx)
       worker.onerror = (e: ErrorEvent) => {
+        console.error('[worker-pool] worker', idx, 'error:', e.message, e.filename, e.lineno)
         const entry = [...this.active.entries()].find(
           ([, v]) => v.workerIdx === idx
         )

@@ -1112,11 +1112,131 @@ processors['excel-to-pdf'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/* ---- PDF to Word (pdf.js text extraction → DOCX via docx lib) --------- */
+/* ---- PDF to Word (visual page image + selectable text-box overlay) ---- */
 async function getDocx() {
   if (!self.docx) importScripts(IMPORT_URLS.docx);
   if (!self.docx) throw new Error('docx library failed to load');
   return self.docx;
+}
+
+async function getJSZip() {
+  if (!self.JSZip) importScripts(IMPORT_URLS.jszip);
+  if (!self.JSZip) throw new Error('JSZip failed to load');
+  return self.JSZip;
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+var EMU_PER_PT = 12700;   // 914400 EMU/inch ÷ 72 pt/inch
+var TWIP_PER_PT = 20;     // 1440 twips/inch ÷ 72 pt/inch
+
+/* Merge text items that share the same baseline into one line. Reduces the
+   number of floating text boxes from ~hundreds/page to ~tens/page. */
+function mergeTextLines(items) {
+  var lines = {};
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var yKey = Math.round(it.y);
+    if (!lines[yKey]) lines[yKey] = [];
+    lines[yKey].push(it);
+  }
+  var ys = Object.keys(lines).map(Number).sort(function (a, b) { return a - b; });
+  var merged = [];
+  for (var yi = 0; yi < ys.length; yi++) {
+    var arr = lines[ys[yi]].sort(function (a, b) { return a.x - b.x; });
+    var text = '';
+    var minX = Infinity;
+    var maxX = -Infinity;
+    var maxFs = 0;
+    var yBase = arr[0].y;
+    for (var k = 0; k < arr.length; k++) {
+      if (text && k > 0 && arr[k].x > arr[k - 1].x + (arr[k - 1].w || 0) + 1) {
+        text += ' ';
+      }
+      text += arr[k].str;
+      if (arr[k].x < minX) minX = arr[k].x;
+      if (arr[k].x + (arr[k].w || 0) > maxX) maxX = arr[k].x + (arr[k].w || 0);
+      if (arr[k].fontSize > maxFs) maxFs = arr[k].fontSize;
+    }
+    if (!text.trim()) continue;
+    if (maxFs <= 0) maxFs = 10;
+    merged.push({
+      text: text,
+      x: minX,
+      y: yBase,
+      w: Math.max(maxX - minX, maxFs),
+      fontSize: maxFs,
+    });
+  }
+  return merged;
+}
+
+/* Build the XML for a full-page floating image (behind the document text). */
+function buildPageImageXml(docPrId, relId, imgName, wEmu, hEmu) {
+  return [
+    '<w:p><w:r><w:rPr><w:noProof/></w:rPr><w:drawing>',
+      '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="1" locked="0" layoutInCell="1" allowOverlap="1">',
+        '<wp:simplePos x="0" y="0"/>',
+        '<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>',
+        '<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>',
+        '<wp:extent cx="' + wEmu + '" cy="' + hEmu + '"/>',
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>',
+        '<wp:wrapNone/>',
+        '<wp:docPr id="' + docPrId + '" name="Picture ' + docPrId + '"/>',
+        '<wp:cNvGraphicFramePr/>',
+        '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">',
+          '<pic:pic><pic:nvPicPr><pic:cNvPr id="' + docPrId + '" name="' + imgName + '"/><pic:cNvPicPr/></pic:nvPicPr>',
+            '<pic:blipFill><a:blip r:embed="rId' + relId + '"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>',
+            '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + wEmu + '" cy="' + hEmu + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>',
+          '</pic:pic>',
+        '</a:graphicData></a:graphic>',
+      '</wp:anchor>',
+    '</w:drawing></w:r></w:p>',
+  ].join('');
+}
+
+/* Build the XML for a floating text box (in front of the image) carrying
+   one line of selectable text. Transparent fill so the image shows through. */
+function buildTextBoxXml(docPrId, relHeight, xEmu, yEmu, wEmu, hEmu, text, fontSizeHalfPt, color) {
+  return [
+    '<w:p><w:r><w:drawing>',
+      '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="' + relHeight + '" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">',
+        '<wp:simplePos x="0" y="0"/>',
+        '<wp:positionH relativeFrom="page"><wp:posOffset>' + xEmu + '</wp:posOffset></wp:positionH>',
+        '<wp:positionV relativeFrom="page"><wp:posOffset>' + yEmu + '</wp:posOffset></wp:positionV>',
+        '<wp:extent cx="' + wEmu + '" cy="' + hEmu + '"/>',
+        '<wp:effectExtent l="0" t="0" r="0" b="0"/>',
+        '<wp:wrapNone/>',
+        '<wp:docPr id="' + docPrId + '" name="Text Box ' + docPrId + '"/>',
+        '<wp:cNvGraphicFramePr/>',
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">',
+          '<wps:wsp><wps:cNvSpPr txBox="1"/>',
+            '<wps:spPr>',
+              '<a:xfrm><a:off x="0" y="0"/><a:ext cx="' + wEmu + '" cy="' + hEmu + '"/></a:xfrm>',
+              '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>',
+              '<a:noFill/>',
+              '<a:ln><a:noFill/></a:ln>',
+            '</wps:spPr>',
+            '<wps:txbx><w:txbxContent>',
+              '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="0" w:lineRule="exact"/><w:jc w:val="left"/></w:pPr>',
+                '<w:r><w:rPr><w:sz w:val="' + fontSizeHalfPt + '"/><w:szCs w:val="' + fontSizeHalfPt + '"/><w:color w:val="' + color + '"/></w:rPr>',
+                  '<w:t xml:space="preserve">' + text + '</w:t>',
+                '</w:r>',
+              '</w:p>',
+            '</w:txbxContent></wps:txbx>',
+            '<wps:bodyPr rot="0" spcFirstLastPara="0" vertOverflow="overflow" horzOverflow="overflow" vert="horz" wrap="square" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr>',
+          '</wps:wsp>',
+        '</a:graphicData></a:graphic>',
+      '</wp:anchor>',
+    '</w:drawing></w:r></w:p>',
+  ].join('');
 }
 
 /** Extract text items (with y-positions) per page using pdf.js. */
@@ -1155,146 +1275,172 @@ async function extractTextPages(data, scale) {
 }
 
 processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
-  var docxLib = await getDocx();
   var out = [];
 
-  /* Check if inputs are pre-rendered images (from main thread) or raw PDFs */
-  var hasImages = inputs.some(function (inp) { return inp.fileName.endsWith('.jpg') || inp.fileName.endsWith('.png'); });
+  /* Pre-rendered page images + text JSON arrive from the main thread. */
+  var hasImages = inputs.some(function (inp) { return /^page-[0-9]+\.(jpg|png)$/.test(inp.fileName); });
   var mainThreadRendered = !!(opts && opts._mainThreadRendered) || hasImages;
 
   if (mainThreadRendered) {
-    /* Main thread already rendered pages as images + extracted text */
-    /* Group inputs by page: page-N.jpg + __text_N__.json */
+    var JSZip = await getJSZip();
+
+    /* Collect page images + per-page text data. */
     var pageImages = [];
     var pageTexts = {};
-
     for (var i = 0; i < inputs.length; i++) {
-      if (inputs[i].fileName.match(/^page-[0-9]+\.(jpg|png)$/)) {
-        pageImages.push(inputs[i]);
-      } else if (inputs[i].fileName.match(/^__text_[0-9]+__\.json$/)) {
-        var textJson = new TextDecoder().decode(new Uint8Array(inputs[i].data));
+      var m = inputs[i].fileName.match(/^page-([0-9]+)\.(jpg|png)$/);
+      if (m) {
+        pageImages.push({ page: parseInt(m[1], 10), data: new Uint8Array(inputs[i].data) });
+      } else if (/^__text_[0-9]+__\.json$/.test(inputs[i].fileName)) {
         try {
-          var textData = JSON.parse(textJson);
-          pageTexts[textData.page] = textData;
+          var td = JSON.parse(new TextDecoder().decode(new Uint8Array(inputs[i].data)));
+          pageTexts[td.page] = td;
         } catch (_) {}
       }
     }
+    pageImages.sort(function (a, b) { return a.page - b.page; });
+    var pageCount = pageImages.length;
+    if (pageCount === 0) throw new Error('No rendered pages received from main thread');
 
-    console.log('[pdf-to-word] Pre-rendered mode: ' + pageImages.length + ' page images, ' + Object.keys(pageTexts).length + ' text pages');
+    var zip = new JSZip();
+    var rels = [];
+    var bodyParts = [];
+    var docPrId = 1;
+    var relHeight = 2;
 
-    var children = [];
-    for (var pi = 0; pi < pageImages.length; pi++) {
-      var pageNum = pi + 1;
-      var imgData = new Uint8Array(pageImages[pi].data);
+    /* Section page size = first page dimensions (twips). */
+    var firstTd = pageTexts[pageImages[0].page];
+    var sectionWPt = (firstTd && firstTd.pageWidth) ? firstTd.pageWidth : 595;
+    var sectionHPt = (firstTd && firstTd.pageHeight) ? firstTd.pageHeight : 842;
 
-      /* Add the page image as a full-page paragraph */
-      children.push(new docxLib.Paragraph({
-        children: [new docxLib.ImageRun({
-          data: imgData,
-          transformation: { width: 595, height: 842 },
-        })],
-        spacing: { before: 0, after: 0 },
-      }));
+    for (var pi = 0; pi < pageCount; pi++) {
+      var pno = pageImages[pi].page;
+      var imgData = pageImages[pi].data;
+      var tdata = pageTexts[pno];
+      var pageWPt = (tdata && tdata.pageWidth) ? tdata.pageWidth : sectionWPt;
+      var pageHPt = (tdata && tdata.pageHeight) ? tdata.pageHeight : sectionHPt;
 
-      /* Add invisible selectable text after the image */
-      var textData = pageTexts[pageNum];
-      if (textData && textData.items && textData.items.length > 0) {
-        /* Group text items into lines and add as invisible paragraphs */
-        var lines = {};
-        for (var ti = 0; ti < textData.items.length; ti++) {
-          var item = textData.items[ti];
-          var yKey = Math.round(item.y);
-          if (!lines[yKey]) lines[yKey] = [];
-          lines[yKey].push({ x: item.x, text: item.str });
-        }
-        var sortedYs = Object.keys(lines).map(Number).sort(function (a, b) { return b - a; });
-        for (var ly = 0; ly < sortedYs.length; ly++) {
-          var lineItems = lines[sortedYs[ly]].sort(function (a, b) { return a.x - b.x; });
-          var lineText = lineItems.map(function (it) { return it.text; }).join('').trim();
-          if (lineText) {
-            /* Invisible text: white color, 1pt font, hidden */
-            children.push(new docxLib.Paragraph({
-              children: [new docxLib.TextRun({
-                text: lineText,
-                color: 'FFFFFF',
-                size: 1,
-              })],
-              spacing: { before: 0, after: 0, line: 1 },
-            }));
-          }
+      /* 1. Add the page image to media + a relationship. */
+      var imgRelId = pi + 1;
+      var imgName = 'image' + (pi + 1) + '.jpeg';
+      zip.file('word/media/' + imgName, imgData);
+      rels.push('<Relationship Id="rId' + imgRelId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/' + imgName + '"/>');
+
+      /* 2. Full-page floating image (behind the text layer). */
+      var pageWEmu = Math.round(pageWPt * EMU_PER_PT);
+      var pageHEmu = Math.round(pageHPt * EMU_PER_PT);
+      bodyParts.push(buildPageImageXml(docPrId++, imgRelId, imgName, pageWEmu, pageHEmu));
+
+      /* 3. Selectable text overlay — one floating text box per text line. */
+      if (tdata && tdata.items && tdata.items.length > 0) {
+        var lines = mergeTextLines(tdata.items);
+        for (var li = 0; li < lines.length; li++) {
+          var ln = lines[li];
+          var xEmu = Math.round(ln.x * EMU_PER_PT);
+          /* PDF y is the baseline (origin bottom-left). Convert to top-left
+             origin and offset by ~ascent so the box top sits on the cap line. */
+          var yEmu = Math.round((pageHPt - ln.y - ln.fontSize * 0.78) * EMU_PER_PT);
+          var wEmu = Math.round((ln.w + ln.fontSize * 0.5) * EMU_PER_PT);
+          var hEmu = Math.round(ln.fontSize * 1.3 * EMU_PER_PT);
+          var szHalfPt = Math.max(2, Math.round(ln.fontSize * 2));
+          if (yEmu < 0) yEmu = 0;
+          if (xEmu < 0) xEmu = 0;
+          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(ln.text), szHalfPt, '000000'));
         }
       }
 
-      /* Page break between pages */
-      if (pi < pageImages.length - 1) {
-        children.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
+      /* 4. Page break between pages (not after the last). */
+      if (pi < pageCount - 1) {
+        bodyParts.push('<w:p><w:r><w:br w:type="page"/></w:r></w:p>');
       }
 
-      onProgress((pi + 1) / pageImages.length);
-      log('Building page ' + pageNum + '/' + pageImages.length);
+      onProgress((pi + 1) / pageCount);
+      var itemCount = (tdata && tdata.items) ? tdata.items.length : 0;
+      log('Page ' + pno + '/' + pageCount + ' — ' + itemCount + ' text items');
     }
 
-    var d = new docxLib.Document({
-      sections: [{
-        properties: {
-          page: {
-            size: { width: 11906, height: 16838 },
-            margin: { top: 0, bottom: 0, left: 0, right: 0 },
-          },
-        },
-        children: children,
-      }],
-    });
+    /* ---- Assemble document.xml ---- */
+    var sectionWTwip = Math.round(sectionWPt * TWIP_PER_PT);
+    var sectionHTwip = Math.round(sectionHPt * TWIP_PER_PT);
+    var documentXml = [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">',
+        '<w:body>',
+          bodyParts.join(''),
+          '<w:sectPr>',
+            '<w:pgSz w:w="' + sectionWTwip + '" w:h="' + sectionHTwip + '"/>',
+            '<w:pgMar w:top="0" w:right="0" w:bottom="0" w:left="0" w:header="0" w:footer="0" w:gutter="0"/>',
+            '<w:cols w:space="0"/>',
+          '</w:sectPr>',
+        '</w:body>',
+      '</w:document>',
+    ].join('');
+    zip.file('word/document.xml', documentXml);
 
-    var blob = await docxLib.Packer.toBlob(d);
-    var arr = new Uint8Array(await blob.arrayBuffer());
-    console.log('[pdf-to-word] DOCX generated: ' + arr.length + ' bytes');
+    /* ---- word/_rels/document.xml.rels ---- */
+    rels.push('<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>');
+    rels.push('<Relationship Id="rIdSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>');
+    rels.push('<Relationship Id="rIdFontTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>');
+    zip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels.join('') + '</Relationships>');
+
+    /* ---- [Content_Types].xml ---- */
+    zip.file('[Content_Types].xml', [
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+        '<Default Extension="xml" ContentType="application/xml"/>',
+        '<Default Extension="jpeg" ContentType="image/jpeg"/>',
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+        '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>',
+        '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>',
+        '<Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>',
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+        '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
+      '</Types>',
+    ].join(''));
+
+    /* ---- _rels/.rels ---- */
+    zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>');
+
+    /* ---- word/styles.xml (minimal) ---- */
+    zip.file('word/styles.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>');
+
+    /* ---- word/settings.xml (minimal) ---- */
+    zip.file('word/settings.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:zoom w:percent="100"/></w:settings>');
+
+    /* ---- word/fontTable.xml (minimal) ---- */
+    zip.file('word/fontTable.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:font w:name="Calibri"><w:charset w:val="00"/><w:family w:val="swiss"/></w:font></w:fonts>');
+
+    /* ---- docProps/core.xml + app.xml ---- */
+    zip.file('docProps/core.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>Converted Document</dc:title><dc:creator>PDF Suite</dc:creator></cp:coreProperties>');
+    zip.file('docProps/app.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>PDF Suite</Application></Properties>');
+
+    var docxBytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    log('DOCX assembled: ' + docxBytes.length + ' bytes, ' + pageCount + ' page(s)');
+
     out.push({
       name: 'converted.docx',
-      data: toArrayBuffer(arr),
+      data: toArrayBuffer(docxBytes),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      note: pageImages.length + ' page(s) — visual copy with selectable text',
+      note: pageCount + ' page(s) · visual copy + selectable text',
     });
   } else {
-    /* Fallback: raw PDF input — render in worker (may have font issues) */
-    var pdfjs = await loadPdfJs();
+    /* Fallback: raw PDF input (main-thread render failed) — text-only DOCX. */
+    var docxLib = await getDocx();
     for (var fi = 0; fi < inputs.length; fi++) {
-      log('Converting ' + inputs[fi].fileName + ' to Word');
-      var dataCopy = inputs[fi].data.slice(0);
-      var pdfDoc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
-      var pageCount = pdfDoc.numPages;
-      var children2 = [];
-
-      for (var p = 1; p <= pageCount; p++) {
-        var page = await pdfDoc.getPage(p);
-        var viewport = page.getViewport({ scale: 2.0 });
-        var canvas2 = new OffscreenCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
-        var ctx2 = canvas2.getContext('2d');
-        if (!ctx2) continue;
-        ctx2.fillStyle = '#ffffff';
-        ctx2.fillRect(0, 0, canvas2.width, canvas2.height);
-        await page.render({ canvasContext: ctx2, viewport: viewport }).promise;
-        var pngBlob2 = await canvas2.convertToBlob({ type: 'image/png' });
-        var pngArr2 = new Uint8Array(await pngBlob2.arrayBuffer());
-        children2.push(new docxLib.Paragraph({
-          children: [new docxLib.ImageRun({ data: pngArr2, transformation: { width: 595, height: 842 } })],
-          spacing: { before: 0, after: 0 },
-        }));
-        if (p < pageCount) children2.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
-        try { await page.cleanup(); } catch (_) {}
-        onProgress((fi + (p / pageCount)) / inputs.length);
+      log('Converting ' + inputs[fi].fileName + ' (text-only fallback)');
+      var pages = await extractTextPages(inputs[fi].data);
+      var children = [];
+      for (var pp = 0; pp < pages.length; pp++) {
+        for (var ll = 0; ll < pages[pp].length; ll++) {
+          children.push(new docxLib.Paragraph({ children: [new docxLib.TextRun(pages[pp][ll] || '')] }));
+        }
+        if (pp < pages.length - 1) children.push(new docxLib.Paragraph({ children: [new docxLib.PageBreak()] }));
       }
-      try { await pdfDoc.destroy(); } catch (_) {}
-
-      var d2 = new docxLib.Document({
-        sections: [{
-          properties: { page: { size: { width: 11906, height: 16838 }, margin: { top: 0, bottom: 0, left: 0, right: 0 } } },
-          children: children2,
-        }],
-      });
-      var blob2 = await docxLib.Packer.toBlob(d2);
-      var arr2 = new Uint8Array(await blob2.arrayBuffer());
-      out.push({ name: stripExt(inputs[fi].fileName) + '.docx', data: toArrayBuffer(arr2), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', note: pageCount + ' page(s) — visual copy' });
+      var d = new docxLib.Document({ sections: [{ properties: { page: { size: { width: 11906, height: 16838 } } }, children: children }] });
+      var blob = await docxLib.Packer.toBlob(d);
+      var arr = new Uint8Array(await blob.arrayBuffer());
+      out.push({ name: stripExt(inputs[fi].fileName) + '.docx', data: toArrayBuffer(arr), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', note: pages.length + ' page(s) — text only' });
       onProgress((fi + 1) / inputs.length);
     }
   }

@@ -168,3 +168,37 @@ Stage Summary:
   - pdf.js needs document polyfill + blob-URL workerSrc to run inside a Web Worker.
   - Template literals require double-escaping for regex/newlines that must survive into the generated worker source.
 - Total implemented tools: 16 of 20. Remaining 4 (Organize, Crop, Sign & Annotate, Edit PDF Text) are Step 6.
+
+---
+Task ID: pdf-to-word-selectable-text
+Agent: main (orchestrator)
+Task: Fix PDF to Word — output was image-only with no selectable text. Add a selectable text layer over the page images so the result is both a visual copy AND has selectable/selectable text (searchable-document style).
+
+Work Log:
+- Root cause: previous implementation embedded page images as flowing paragraphs and added "invisible" text as separate flowing paragraphs AFTER each image. The text was not positioned over the image, so it wasn't selectable where the user sees text — it just created extra blank space.
+- New approach: hybrid "searchable document" — each page is a full-page floating image (behind the document) PLUS floating text boxes (in front) positioned at the exact (x,y) of each text line, carrying the real extracted text. This mirrors how searchable/OCR PDFs work: the image provides the visual, the text overlay provides selectability.
+- Added `jszip` to `WORKER_IMPORT_URLS` in `src/lib/processing/libs.ts` so the worker can assemble the DOCX manually (the `docx` library doesn't support absolutely-positioned floating text boxes).
+- Updated main-thread rendering in `src/components/tool-page.tsx` (PDF to Word branch):
+  - Computes the unscaled viewport (scale 1.0 = PDF points) for accurate page dimensions + text positioning.
+  - Renders each page to canvas at scale 2.0 (high-res image) and extracts text via `page.getTextContent()` with transform-based font-size calculation (`Math.hypot(tr[2], tr[3])`).
+  - Sends both page JPEGs and per-page text JSON (items with x/y/w/h/fontSize in PDF points + pageWidth/pageHeight in points) to the worker.
+- Rewrote `processors['pdf-to-word']` in `src/lib/processing/worker-source.ts`:
+  - New helpers: `getJSZip()`, `escapeXml()`, `mergeTextLines()` (groups text items by baseline into one line per text box — reduces boxes from ~hundreds to ~tens per page), `buildPageImageXml()` (floating `<wp:anchor behindDoc="1">` full-page image), `buildTextBoxXml()` (floating `<wp:anchor behindDoc="0">` `<wps:wsp txBox>` with `<w:txbxContent>` carrying real `<w:t>` text, `noFill` + `noFill` line so the image shows through).
+  - Assembles a complete minimal DOCX via JSZip: `[Content_Types].xml`, `_rels/.rels`, `word/document.xml`, `word/_rels/document.xml.rels`, `word/media/imageN.jpeg`, `word/styles.xml`, `word/settings.xml`, `word/fontTable.xml`, `docProps/core.xml`, `docProps/app.xml`.
+  - Coordinate conversion: PDF (bottom-left, points) → DOCX (top-left, EMU). `docx_y = (pageHeight - pdf_y - fontSize*0.78) * 12700`. Page size in twips for `<w:pgSz>`.
+  - One `<w:sectPr>` with zero margins + page size from the first page; `<w:br w:type="page"/>` between pages.
+  - Text color: black (`000000`) — for the common case (black text on white) the overlay aligns with the image text and is effectively invisible (black on black), while remaining fully selectable.
+  - Kept a text-only fallback (via `getDocx` + `extractTextPages`) for the rare case the main-thread render fails and a raw PDF reaches the worker.
+- Fixed a critical template-literal escaping bug: `\n` inside single-quoted XML strings in the worker source became literal newlines (breaking the JS string → `SyntaxError: Invalid or unexpected token`). Removed the cosmetic `\n` between XML declaration and root element in all 7 `zip.file(...)` calls (XML is valid without it). This was the same class of bug noted earlier ("use `\\n` for newlines" in template literals).
+- Added then removed diagnostic `console.log`s in `worker-pool.ts` (init/dispatch) and `tool-page.tsx` (render stages) used to locate the syntax error. Kept a `console.error` in the pool's `worker.onerror` handler (genuinely useful for surfacing worker creation errors that would otherwise be silently swallowed).
+
+Stage Summary:
+- Browser-verified end-to-end via Agent Browser + LibreOffice + VLM:
+  - Uploaded a 2-page test PDF (title, heading, 2 body paragraphs, footnote on p1; title + 2 lines on p2).
+  - Conversion produced a 72,570-byte DOCX. Worker logs: "Page 1/2 — 5 text items", "Page 2/2 — 3 text items", "DOCX assembled: 72570 bytes, 2 page(s)".
+  - DOCX structure (verified by unzipping + parsing): 2 page images (`word/media/image1.jpeg` 57KB, `image2.jpeg` 35KB) + 8 floating text boxes (`<wps:txbx>`) containing 8 `<w:t>` text runs with ALL the original text ("PDF to Word Conversion Test", "This is a heading line that should remain selectable.", both body paragraphs, the footnote, "Second Page Title", both p2 lines). 1 page break. Well-formed XML confirmed.
+  - LibreOffice opened the DOCX and converted it to PDF without errors (valid OOXML).
+  - VLM analysis of both rendered pages: text is "clear and readable, no blurriness or doubling, no visual artifacts" — the black text-box overlay aligns with the image text so there's no visible double-rendering.
+  - The 8 text runs inside `<wps:txbx>` elements are real selectable text (click in the text box → select/copy/edit), positioned over the page images. This resolves the "just images, no selectable text" complaint.
+- Key architectural decision: building the DOCX manually with JSZip (rather than the `docx` library) was necessary because absolutely-positioned floating text boxes (`<wp:anchor>` + `<wps:wsp txBox>`) are not exposed by the `docx` library API. The manual approach gives full control over the searchable-document layout.
+- Browser-only constraint acknowledged: true LibreOffice-quality conversion (text reflowed as native Word paragraphs with exact fonts) requires server-side processing (which iLovePDF uses). The hybrid image+text-overlay approach is the best achievable fully client-side: pixel-perfect visual copy + selectable text positioned over the image.

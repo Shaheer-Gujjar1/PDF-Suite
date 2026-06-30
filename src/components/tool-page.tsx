@@ -320,16 +320,21 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
 
           for (let p = 1; p <= pageCount; p++) {
             const page = await pdfDoc.getPage(p)
-            const viewport = page.getViewport({ scale: 2.0 })
+            // Unscaled viewport = PDF user-space units (points). Used for
+            // page size + absolute positioning of the selectable text layer.
+            const pointViewport = page.getViewport({ scale: 1 })
+            const pageWPt = pointViewport.width
+            const pageHPt = pointViewport.height
+            const renderViewport = page.getViewport({ scale: 2.0 })
 
             // Render page to canvas (main thread — fonts work correctly)
             const canvas = document.createElement('canvas')
-            canvas.width = Math.ceil(viewport.width)
-            canvas.height = Math.ceil(viewport.height)
+            canvas.width = Math.ceil(renderViewport.width)
+            canvas.height = Math.ceil(renderViewport.height)
             const ctx = canvas.getContext('2d')!
             ctx.fillStyle = '#ffffff'
             ctx.fillRect(0, 0, canvas.width, canvas.height)
-            await page.render({ canvasContext: ctx, viewport }).promise
+            await page.render({ canvasContext: ctx, viewport: renderViewport }).promise
 
             // Convert to JPEG
             const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
@@ -343,27 +348,36 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
               size: arr.buffer.byteLength,
             })
 
-            // Extract text for this page (for selectable text overlay)
+            // Extract text for this page (for selectable text overlay).
+            // getTextContent() returns transform/width/height in PDF points.
             const textContent = await page.getTextContent()
-            const textItems = textContent.items.map((item: any) => ({
-              str: item.str || '',
-              x: item.transform[4],
-              y: item.transform[5],
-              w: item.width || 0,
-              h: item.height || 10,
-              fontSize: Math.sqrt(item.transform[0] * item.transform[0] + item.transform[1] * item.transform[1]),
-            })).filter((item: any) => item.str.trim())
+            const textItems = textContent.items.map((item: any) => {
+              const tr = item.transform
+              // Font size (points) from the transform matrix scale.
+              const fs = Math.hypot(tr[2], tr[3]) || Math.hypot(tr[0], tr[1]) || (item.height || 10)
+              return {
+                str: item.str || '',
+                x: tr[4],          // PDF points, origin bottom-left
+                y: tr[5],          // PDF points, origin bottom-left
+                w: item.width || 0,
+                h: item.height || fs,
+                fontSize: fs,
+              }
+            }).filter((item: any) => item.str.trim())
 
-            // Send text as a separate "text" input with special filename
-            if (textItems.length > 0) {
-              const textJson = JSON.stringify({ page: p, items: textItems, pageWidth: viewport.width, pageHeight: viewport.height })
-              const textEncoded = new TextEncoder().encode(textJson)
-              inputs.push({
-                fileName: `__text_${p}__.json`,
-                data: textEncoded.buffer.slice(0),
-                size: textEncoded.buffer.byteLength,
-              })
-            }
+            // Send text + point dimensions as a separate input.
+            const textJson = JSON.stringify({
+              page: p,
+              items: textItems,
+              pageWidth: pageWPt,
+              pageHeight: pageHPt,
+            })
+            const textEncoded = new TextEncoder().encode(textJson)
+            inputs.push({
+              fileName: `__text_${p}__.json`,
+              data: textEncoded.buffer.slice(0),
+              size: textEncoded.buffer.byteLength,
+            })
 
             try { await page.cleanup() } catch (_) {}
           }
