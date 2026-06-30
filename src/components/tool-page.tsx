@@ -111,7 +111,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2,
   })
   const [htmlConfig, setHtmlConfig] = React.useState<HtmlToPdfConfig>({
-    source: 'file', html: '', url: '', orientation: 'portrait', pageSize: 'a4',
+    html: '', orientation: 'portrait', pageSize: 'a4',
     screenWidth: 'desktop', onePage: false, margin: 0,
   })
 
@@ -135,7 +135,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setRotateConfig({ angle: 90 })
     setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
     setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
-    setHtmlConfig({ source: 'file', html: '', url: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
+    setHtmlConfig({ html: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
   }, [tool.id])
 
   // Sync mergeOrder/wordOrder when files change (add new files to the end)
@@ -582,7 +582,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           <HtmlToPdfView
             config={htmlConfig}
             onConfigChange={setHtmlConfig}
-            onRemoveFile={() => setHtmlConfig({ ...htmlConfig, html: '', url: '', source: 'file' })}
+            onRemoveFile={() => setHtmlConfig({ ...htmlConfig, html: '' })}
           />
         ) : cfg.mode === 'files' ? (
           <Dropzone

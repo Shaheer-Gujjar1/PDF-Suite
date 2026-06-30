@@ -2,11 +2,10 @@
 
 import * as React from 'react'
 import {
-  Loader2, X, FileCode2, Link2, RectangleVertical, RectangleHorizontal,
+  Loader2, X, FileCode2, RectangleVertical, RectangleHorizontal,
   Maximize, FileText, Monitor, Tablet, Smartphone,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -15,9 +14,7 @@ import { Slider } from '@/components/ui/slider'
 import { cn } from '@/lib/utils'
 
 export interface HtmlToPdfConfig {
-  source: 'file' | 'url' | 'paste'
   html: string
-  url: string
   orientation: 'portrait' | 'landscape'
   pageSize: 'a4' | 'letter'
   screenWidth: 'desktop' | 'tablet' | 'mobile'
@@ -43,78 +40,29 @@ const SCREEN_WIDTHS: Record<string, number> = {
 }
 
 export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPdfViewProps) {
-  const [fetching, setFetching] = React.useState(false)
-  const [fetchError, setFetchError] = React.useState<string | null>(null)
+  const [mode, setMode] = React.useState<'upload' | 'paste'>('upload')
+  const [fileName, setFileName] = React.useState<string>('')
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  const hasContent = config.html.trim().length > 0
 
   const set = (key: keyof HtmlToPdfConfig, value: unknown) => {
     onConfigChange({ ...config, [key]: value })
   }
 
-  const fetchUrl = async () => {
-    if (!config.url.trim()) return
-    setFetching(true)
-    setFetchError(null)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const text = await file.text()
+    setFileName(file.name)
+    onConfigChange({ ...config, html: text })
+    e.target.value = ''
+  }
 
-    // Normalize URL — add https:// if missing
-    let url = config.url.trim()
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = 'https://' + url
-    }
-
-    // Validate URL
-    try { new URL(url) } catch {
-      setFetchError('Invalid URL. Please enter a valid website address.')
-      setFetching(false)
-      return
-    }
-
-    // Try multiple CORS proxies in sequence — public proxies can be unreliable
-    const proxies = [
-      (u: string) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-      (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-      (u: string) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(u)}`,
-    ]
-
-    let html: string | null = null
-    let lastError = ''
-
-    for (let i = 0; i < proxies.length; i++) {
-      try {
-        const proxyUrl = proxies[i](url)
-        const res = await fetch(proxyUrl, {
-          method: 'GET',
-          headers: { 'Accept': 'text/html,*/*' },
-          signal: AbortSignal.timeout(15000),
-        })
-        if (!res.ok) { lastError = `Proxy ${i + 1} returned status ${res.status}`; continue }
-        const text = await res.text()
-        if (!text || text.length < 50) { lastError = `Proxy ${i + 1} returned empty content`; continue }
-        html = text
-        break
-      } catch (e: any) {
-        lastError = `Proxy ${i + 1}: ${e.message || e.name || 'error'}`
-        continue
-      }
-    }
-
-    if (html) {
-      console.log('[html-to-pdf] Fetched HTML:', html.length, 'chars')
-      // Fix relative URLs by adding a <base> tag
-      const baseUrl = new URL(url).origin
-      const fixedHtml = html.includes('<base')
-        ? html
-        : html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseUrl}">`)
-      onConfigChange({ ...config, html: fixedHtml, source: 'url' })
-      setFetchError(null)
-    } else {
-      setFetchError(
-        `Could not fetch the URL after trying ${proxies.length} proxies. ` +
-        `Last error: ${lastError}. ` +
-        `This may happen if the site blocks automated requests or all proxies are down. ` +
-        `Try again, or copy the page's HTML source and use "Paste HTML code" instead.`
-      )
-    }
-    setFetching(false)
+  const clearContent = () => {
+    setFileName('')
+    onConfigChange({ ...config, html: '' })
+    onRemoveFile?.()
   }
 
   // Calculate page preview dimensions
@@ -132,104 +80,102 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
     return { w, h, label, marginPx, realW, realH }
   }, [config.pageSize, config.orientation, config.margin])
 
-  const hasContent = config.html.trim().length > 0
-
   return (
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
           {hasContent
-            ? 'Content loaded — configure options below and run.'
-            : 'Upload an HTML file, paste HTML code, or enter a website URL.'}
+            ? `Content loaded${fileName ? ` from ${fileName}` : ''} — configure options and run.`
+            : 'Upload an HTML file or paste HTML code below.'}
         </p>
-        {onRemoveFile && hasContent && (
-          <Button variant="outline" size="sm" onClick={onRemoveFile} className="gap-1.5">
+        {hasContent && (
+          <Button variant="outline" size="sm" onClick={clearContent} className="gap-1.5">
             <X className="h-3.5 w-3.5" /> Clear
           </Button>
         )}
       </div>
 
-      {/* Source tabs */}
+      {/* Input area — shown when no content */}
       {!hasContent && (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {/* Upload file */}
-          <label className="flex cursor-pointer flex-col items-center gap-2 rounded-xl border-2 border-dashed border-border bg-card p-5 transition-all hover:border-primary/50 hover:bg-primary/[0.03]">
-            <span className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary">
-              <FileCode2 className="h-6 w-6" />
-            </span>
-            <span className="text-sm font-medium">Upload HTML file</span>
-            <span className="text-xs text-muted-foreground">.html, .htm</span>
-            <input
-              type="file"
-              accept=".html,.htm,text/html"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0]
-                if (file) {
-                  const text = await file.text()
-                  set('html', text)
-                  set('source', 'file')
-                }
-                e.target.value = ''
-              }}
-            />
-          </label>
-
-          {/* URL fetch */}
-          <div className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-border bg-card p-5">
-            <span className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary">
-              <Link2 className="h-6 w-6" />
-            </span>
-            <span className="text-sm font-medium">From URL</span>
-            <div className="flex w-full gap-1">
-              <Input
-                value={config.url}
-                onChange={(e) => set('url', e.target.value)}
-                placeholder="https://example.com"
-                className="h-8 text-xs"
-                onKeyDown={(e) => { if (e.key === 'Enter') fetchUrl() }}
-              />
-              <Button size="sm" className="h-8 px-2" onClick={fetchUrl} disabled={fetching || !config.url.trim()}>
-                {fetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Go'}
-              </Button>
-            </div>
-            {fetchError && <p className="text-xs text-destructive">{fetchError}</p>}
+        <div className="space-y-3">
+          {/* Mode tabs */}
+          <div className="flex gap-2">
+            <button
+              onClick={() => setMode('upload')}
+              className={cn(
+                'flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm font-medium transition-all',
+                mode === 'upload' ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
+              )}
+            >
+              <FileCode2 className="h-4 w-4" /> Upload file
+            </button>
+            <button
+              onClick={() => setMode('paste')}
+              className={cn(
+                'flex items-center gap-1.5 rounded-lg border px-4 py-2 text-sm font-medium transition-all',
+                mode === 'paste' ? 'border-primary bg-primary/5 text-primary' : 'border-border text-muted-foreground hover:border-primary/40'
+              )}
+            >
+              <FileText className="h-4 w-4" /> Paste code
+            </button>
           </div>
 
-          {/* Paste HTML */}
-          <button
-            onClick={() => set('source', 'paste')}
-            className="flex flex-col items-center gap-2 rounded-xl border-2 border-dashed border-border bg-card p-5 transition-all hover:border-primary/50 hover:bg-primary/[0.03]"
-          >
-            <span className="grid h-12 w-12 place-items-center rounded-full bg-primary/10 text-primary">
-              <FileText className="h-6 w-6" />
-            </span>
-            <span className="text-sm font-medium">Paste HTML code</span>
-            <span className="text-xs text-muted-foreground">Write or paste markup</span>
-          </button>
+          {/* Upload mode */}
+          {mode === 'upload' && (
+            <label className="flex min-h-[200px] cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-border bg-card p-6 transition-all hover:border-primary/50 hover:bg-primary/[0.03]">
+              <span className="grid h-14 w-14 place-items-center rounded-full bg-primary/10 text-primary">
+                <FileCode2 className="h-7 w-7" />
+              </span>
+              <div className="text-center">
+                <p className="text-sm font-medium">Click to upload HTML file</p>
+                <p className="text-xs text-muted-foreground">.html, .htm files supported</p>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".html,.htm,text/html"
+                className="hidden"
+                onChange={handleFileUpload}
+              />
+            </label>
+          )}
+
+          {/* Paste mode */}
+          {mode === 'paste' && (
+            <div className="space-y-2">
+              <textarea
+                value={config.html}
+                onChange={(e) => onConfigChange({ ...config, html: e.target.value })}
+                placeholder={'<!DOCTYPE html>\n<html>\n<head><title>My Page</title></head>\n<body>\n  <h1>Hello PDF!</h1>\n  <p>This will be rendered into a PDF.</p>\n</body>\n</html>'}
+                className="min-h-[220px] w-full resize-y rounded-xl border border-border bg-card p-4 font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+              />
+              <p className="text-xs text-muted-foreground">
+                Type or paste HTML — options appear automatically when content is detected.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Paste HTML textarea */}
-      {!hasContent && config.source === 'paste' && (
-        <div className="space-y-2">
-          <Label>HTML Code</Label>
-          <textarea
-            value={config.html}
-            onChange={(e) => set('html', e.target.value)}
-            placeholder={'<!DOCTYPE html>\n<html>\n<head><title>My Page</title></head>\n<body>\n  <h1>Hello PDF!</h1>\n  <p>This will be rendered into a PDF.</p>\n</body>\n</html>'}
-            className="min-h-[200px] w-full resize-y rounded-xl border border-border bg-card p-4 font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
-          />
-          <Button size="sm" onClick={() => set('source', 'paste')} disabled={!config.html.trim()}>
-            Use this HTML
-          </Button>
-        </div>
-      )}
-
-      {/* Options bar (shown when content is loaded) */}
+      {/* Options + preview — shown when content exists */}
       {hasContent && (
         <>
+          {/* Live HTML preview */}
+          <div className="rounded-xl border border-border/60 bg-secondary/30 p-3">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">Preview:</p>
+            <div className="overflow-hidden rounded-lg border border-border bg-white" style={{ maxHeight: '300px' }}>
+              <iframe
+                srcDoc={config.html}
+                title="HTML Preview"
+                className="w-full border-0"
+                style={{ height: '300px', width: '100%' }}
+                sandbox="allow-same-origin"
+              />
+            </div>
+          </div>
+
+          {/* Options */}
           <div className="rounded-xl border border-border/70 bg-secondary/40 p-4 space-y-4">
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {/* Orientation */}
@@ -263,7 +209,7 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
                 </Select>
               </div>
 
-              {/* Screen width (for URL source) */}
+              {/* Render width */}
               <div className="space-y-1.5">
                 <Label className="text-xs font-medium text-muted-foreground">Render width</Label>
                 <RadioGroup
@@ -315,9 +261,7 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
                 {config.onePage ? 'One long page (no splitting)' : 'Split into A4 pages'}
               </button>
               <span className="text-xs text-muted-foreground">
-                {config.onePage
-                  ? 'The entire page becomes one tall PDF page'
-                  : 'Content is split into standard A4/Letter pages'}
+                {config.onePage ? 'Entire page becomes one tall PDF' : 'Content split into standard pages'}
               </span>
             </div>
           </div>
