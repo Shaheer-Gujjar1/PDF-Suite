@@ -54,25 +54,67 @@ export function HtmlToPdfView({ config, onConfigChange, onRemoveFile }: HtmlToPd
     if (!config.url.trim()) return
     setFetching(true)
     setFetchError(null)
-    try {
-      // Use a CORS proxy to fetch the website HTML
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(config.url)}`
-      const res = await fetch(proxyUrl)
-      if (!res.ok) throw new Error(`Failed to fetch (status ${res.status})`)
-      const html = await res.text()
-      if (!html || html.length < 50) throw new Error('Page returned empty content')
+
+    // Normalize URL — add https:// if missing
+    let url = config.url.trim()
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'https://' + url
+    }
+
+    // Validate URL
+    try { new URL(url) } catch {
+      setFetchError('Invalid URL. Please enter a valid website address.')
+      setFetching(false)
+      return
+    }
+
+    // Try multiple CORS proxies in sequence — public proxies can be unreliable
+    const proxies = [
+      (u: string) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+      (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+      (u: string) => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(u)}`,
+    ]
+
+    let html: string | null = null
+    let lastError = ''
+
+    for (let i = 0; i < proxies.length; i++) {
+      try {
+        const proxyUrl = proxies[i](url)
+        const res = await fetch(proxyUrl, {
+          method: 'GET',
+          headers: { 'Accept': 'text/html,*/*' },
+          signal: AbortSignal.timeout(15000),
+        })
+        if (!res.ok) { lastError = `Proxy ${i + 1} returned status ${res.status}`; continue }
+        const text = await res.text()
+        if (!text || text.length < 50) { lastError = `Proxy ${i + 1} returned empty content`; continue }
+        html = text
+        break
+      } catch (e: any) {
+        lastError = `Proxy ${i + 1}: ${e.message || e.name || 'error'}`
+        continue
+      }
+    }
+
+    if (html) {
+      console.log('[html-to-pdf] Fetched HTML:', html.length, 'chars')
       // Fix relative URLs by adding a <base> tag
-      const baseUrl = new URL(config.url).origin
+      const baseUrl = new URL(url).origin
       const fixedHtml = html.includes('<base')
         ? html
         : html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseUrl}">`)
-      set('html', fixedHtml)
-      set('source', 'url')
-    } catch (e: any) {
-      setFetchError(e.message || 'Failed to fetch URL. The site may block cross-origin requests.')
-    } finally {
-      setFetching(false)
+      onConfigChange({ ...config, html: fixedHtml, source: 'url' })
+      setFetchError(null)
+    } else {
+      setFetchError(
+        `Could not fetch the URL after trying ${proxies.length} proxies. ` +
+        `Last error: ${lastError}. ` +
+        `This may happen if the site blocks automated requests or all proxies are down. ` +
+        `Try again, or copy the page's HTML source and use "Paste HTML code" instead.`
+      )
     }
+    setFetching(false)
   }
 
   // Calculate page preview dimensions
