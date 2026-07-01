@@ -119,6 +119,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   })
 
   const processing = useProcessing()
+  // True while the main thread pre-renders pages / runs OCR (before run()).
+  // Without this, the button shows no feedback during the ~30-60s OCR phase.
+  const [preparing, setPreparing] = React.useState(false)
+  const [prepareMsg, setPrepareMsg] = React.useState('')
 
   const related = tools
     .filter((t) => t.category === tool.category && t.id !== tool.id)
@@ -180,10 +184,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const needsPassword = tool.id === 'protect'
   const hasPassword = String(options.password ?? '').length > 0
   const interactiveReady = isInteractive ? interactiveResult !== null : true
-  const runEnabled = canProcess && interactiveReady && (!needsPassword || hasPassword) && !processing.isWorking
+  const runEnabled = canProcess && interactiveReady && (!needsPassword || hasPassword) && !processing.isWorking && !preparing
 
   const handleProcess = async () => {
-    if (!canProcess || processing.isWorking) return
+    if (!canProcess || processing.isWorking || preparing) return
 
     const processor = getProcessor(tool.id)
     let inputs: { fileName: string; data: ArrayBuffer; size: number }[] = []
@@ -191,6 +195,15 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let singleLabel: string | undefined
     let runOptions = options
     let actualProcessor = processor
+
+    // Tools that need main-thread pre-rendering before run() — show feedback.
+    const needsPrepare = isHtmlToPdf || isPdfToWord || isWordToPdf || isExcelToPdf
+    if (needsPrepare) {
+      setPreparing(true)
+      setPrepareMsg(isPdfToWord ? 'Rendering pages & running OCR…' : 'Rendering pages…')
+      // Yield so React paints the preparing state before the heavy work starts.
+      await new Promise((r) => setTimeout(r, 0))
+    }
 
     if (isHtmlToPdf) {
       // HTML to PDF: render HTML visually in iframe, capture with html2canvas,
@@ -527,10 +540,14 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     }
 
     try {
+      setPreparing(false)
       await processing.run({ processor: actualProcessor, mode, inputs, options: runOptions, singleLabel })
     } catch (e) {
       console.error('[handleProcess] run() failed:', e)
       toast.error('Conversion failed: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      setPreparing(false)
+      setPrepareMsg('')
     }
   }
 
@@ -561,13 +578,15 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     e.target.value = ''
   }
 
-  const buttonLabel = processing.isWorking
-    ? 'Processing…'
-    : implemented
-      ? `Run ${tool.name}`
-      : preview
-        ? 'Run engine preview'
-        : `Run ${tool.name}`
+  const buttonLabel = preparing
+    ? prepareMsg
+    : processing.isWorking
+      ? 'Processing…'
+      : implemented
+        ? `Run ${tool.name}`
+        : preview
+          ? 'Run engine preview'
+          : `Run ${tool.name}`
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8 lg:py-12">
@@ -767,7 +786,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             disabled={!runEnabled}
             onClick={handleProcess}
           >
-            {processing.isWorking ? (
+            {(processing.isWorking || preparing) ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             ) : (
               <Wand2 className="mr-2 h-4 w-4" />

@@ -273,3 +273,33 @@ Stage Summary:
   - Searchable via Find & Replace
 - This is the same technique used by searchable/OCR PDFs and by iLovePDF for scanned documents.
 - First-time OCR setup downloads ~2MB WASM core + ~15MB language data from CDN; subsequent pages use the cached worker (~5s per page).
+
+---
+Task ID: pdf-to-word-button-feedback
+Agent: main (orchestrator)
+Task: "Run PDF to Word button not working now" — user saw no feedback during the main-thread OCR phase and thought the button was broken.
+
+Work Log:
+- Root cause: the OCR step runs on the MAIN THREAD inside handleProcess() BEFORE processing.run() is called. During this ~30-60s phase (first-time OCR setup: ~15s WASM core + ~15s language data download, then ~5s/page), processing.isWorking is still false, so:
+  - The button still showed "Run PDF to Word" (not "Processing…")
+  - No spinner appeared
+  - The button wasn't disabled (could be double-clicked)
+  - It looked like nothing was happening
+- Fix: added a `preparing` state + `prepareMsg` to tool-page.tsx:
+  - `setPreparing(true)` at the start of handleProcess for tools that need main-thread pre-rendering (HTML to PDF, PDF to Word, Word to PDF, Excel to PDF).
+  - `setPrepareMsg('Rendering pages & running OCR…')` for PDF to Word, `'Rendering pages…'` for others.
+  - `await new Promise(r => setTimeout(r, 0))` after setPreparing — yields so React paints the preparing state before the heavy synchronous work starts (without this, React batches the state update and the re-render never shows during the OCR phase).
+  - `runEnabled` now includes `!preparing` — button is disabled during prep.
+  - Button label shows `prepareMsg` when preparing, `'Processing…'` when processing.isWorking, otherwise `Run ${tool.name}`.
+  - Spinner shows when `processing.isWorking || preparing`.
+  - `finally { setPreparing(false); setPrepareMsg('') }` clears the state after run() completes/fails.
+  - Guard `if (!canProcess || processing.isWorking || preparing) return` prevents double-clicks.
+- Also added try/catch around processing.run() with a toast error so failures are visible.
+
+Stage Summary:
+- Browser-verified with a cold browser session (closed + reopened to clear Tesseract worker cache):
+  - Uploaded scanned PDF → clicked "Run PDF to Word".
+  - At 3s: button text = "Rendering pages & running OCR…", disabled = true, hasSpinner = true ✓
+  - At 45s: OCR completed, Download buttons appeared ✓
+  - Lint clean ✓
+- The button was always working — the issue was missing visual feedback during the main-thread OCR phase. Now users see a clear "Rendering pages & running OCR…" message with a spinner and disabled button.
