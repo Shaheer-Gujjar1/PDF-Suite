@@ -305,11 +305,15 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       mode = 'single'
       singleLabel = 'HTML → PDF output'
     } else if (isPdfToWord) {
-      // PDF to Word: render each page as image on MAIN THREAD (fonts work here),
-      // also extract text, then send both to worker to build DOCX with
-      // page images + invisible selectable text overlay.
+      // PDF to Word: render each page to an image on the MAIN THREAD, then
+      // run OCR (Tesseract.js) on the image to extract selectable text with
+      // word bounding boxes. Send page image + OCR words to the worker,
+      // which builds a DOCX with the image as a full-page background and
+      // floating text boxes (hidden, selectable) positioned over each OCR
+      // word. Works for both scanned (image-only) and text-based PDFs.
       const orderedFiles = wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
       const { loadPdfJs } = await import('@/hooks/use-pdf')
+      const { ocrCanvas } = await import('@/lib/ocr')
       const pdfjs = await loadPdfJs()
 
       for (const qf of orderedFiles) {
@@ -321,22 +325,37 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           for (let p = 1; p <= pageCount; p++) {
             const page = await pdfDoc.getPage(p)
             // Unscaled viewport = PDF user-space units (points). Used for
-            // page size + absolute positioning of the selectable text layer.
+            // page size + converting OCR pixel coords to point coords.
             const pointViewport = page.getViewport({ scale: 1 })
             const pageWPt = pointViewport.width
             const pageHPt = pointViewport.height
-            const renderViewport = page.getViewport({ scale: 2.0 })
+            const renderScale = 2.0
+            const renderViewport = page.getViewport({ scale: renderScale })
+            const imgW = Math.ceil(renderViewport.width)
+            const imgH = Math.ceil(renderViewport.height)
 
-            // Render page to canvas (main thread — fonts work correctly)
+            // Render page to canvas (main thread - fonts work correctly)
             const canvas = document.createElement('canvas')
-            canvas.width = Math.ceil(renderViewport.width)
-            canvas.height = Math.ceil(renderViewport.height)
+            canvas.width = imgW
+            canvas.height = imgH
             const ctx = canvas.getContext('2d')!
             ctx.fillStyle = '#ffffff'
-            ctx.fillRect(0, 0, canvas.width, canvas.height)
+            ctx.fillRect(0, 0, imgW, imgH)
             await page.render({ canvasContext: ctx, viewport: renderViewport }).promise
 
-            // Convert to JPEG
+            // Run OCR (Tesseract.js) on the rendered canvas -> word bounding
+            // boxes in image pixel coordinates (top-left origin). This works
+            // for scanned (image-only) PDFs where pdf.js text extraction
+            // returns nothing, AND for text-based PDFs.
+            let ocrWords: { text: string; x0: number; y0: number; x1: number; y1: number; confidence: number }[] = []
+            try {
+              const ocrResult = await ocrCanvas(canvas)
+              ocrWords = ocrResult.words.filter(w => w.text.trim() && w.confidence > 40)
+            } catch (e) {
+              console.error('OCR failed for page', p, e)
+            }
+
+            // Convert canvas to JPEG for the page image.
             const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
             const base64 = dataUrl.split(',')[1]
             const binary = atob(base64)
@@ -348,35 +367,22 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
               size: arr.buffer.byteLength,
             })
 
-            // Extract text for this page (for selectable text overlay).
-            // getTextContent() returns transform/width/height in PDF points.
-            const textContent = await page.getTextContent()
-            const textItems = textContent.items.map((item: any) => {
-              const tr = item.transform
-              // Font size (points) from the transform matrix scale.
-              const fs = Math.hypot(tr[2], tr[3]) || Math.hypot(tr[0], tr[1]) || (item.height || 10)
-              return {
-                str: item.str || '',
-                x: tr[4],          // PDF points, origin bottom-left
-                y: tr[5],          // PDF points, origin bottom-left
-                w: item.width || 0,
-                h: item.height || fs,
-                fontSize: fs,
-              }
-            }).filter((item: any) => item.str.trim())
-
-            // Send text + point dimensions as a separate input.
-            const textJson = JSON.stringify({
+            // Send OCR words + page/image dimensions as a separate input.
+            // Coordinates are in image pixels (top-left origin); the worker
+            // converts to EMU using imgW/imgH -> page dimensions.
+            const ocrJson = JSON.stringify({
               page: p,
-              items: textItems,
+              words: ocrWords,
               pageWidth: pageWPt,
               pageHeight: pageHPt,
+              imgWidth: imgW,
+              imgHeight: imgH,
             })
-            const textEncoded = new TextEncoder().encode(textJson)
+            const ocrEncoded = new TextEncoder().encode(ocrJson)
             inputs.push({
               fileName: `__text_${p}__.json`,
-              data: textEncoded.buffer.slice(0),
-              size: textEncoded.buffer.byteLength,
+              data: ocrEncoded.buffer.slice(0),
+              size: ocrEncoded.buffer.byteLength,
             })
 
             try { await page.cleanup() } catch (_) {}
@@ -391,7 +397,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       actualProcessor = 'pdf-to-word'
       runOptions = { ...options, _mainThreadRendered: true }
       mode = 'single'
-      singleLabel = 'PDF → Word output'
+      singleLabel = 'PDF -> Word output'
     } else if (isWordToPdf) {
       // Word to PDF: pre-render DOCX to page images on the main thread
       // (using mammoth + html2canvas), then send images to the worker
@@ -520,7 +526,12 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
     }
 
-    await processing.run({ processor: actualProcessor, mode, inputs, options: runOptions, singleLabel })
+    try {
+      await processing.run({ processor: actualProcessor, mode, inputs, options: runOptions, singleLabel })
+    } catch (e) {
+      console.error('[handleProcess] run() failed:', e)
+      toast.error('Conversion failed: ' + (e instanceof Error ? e.message : String(e)))
+    }
   }
 
   // Merge file handlers

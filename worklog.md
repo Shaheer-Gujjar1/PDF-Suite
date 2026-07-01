@@ -233,3 +233,43 @@ Stage Summary:
   - The text is hidden (invisible, no doubling) BUT fully selectable via Ctrl+A → Copy and searchable via Find in Word/LibreOffice.
 - Note: `pdftotext` on the LibreOffice-exported PDF returns empty because LibreOffice's writer_pdf_Export filter does not include hidden text in PDF output by default — this is a PDF export setting, not a DOCX issue. The hidden text IS in the DOCX (verified by XML parsing) and IS selectable/searchable when the DOCX is opened in Word or LibreOffice Writer.
 - The "text not exactly over the image" complaint is resolved by making the text invisible (zero visual footprint) while keeping it selectable — the same technique used by searchable/OCR PDFs.
+
+---
+Task ID: pdf-to-word-ocr
+Agent: main (orchestrator)
+Task: Fix PDF to Word for scanned (image-only) PDFs — pdf.js text extraction returns nothing for scanned pages, so text boxes were empty. User requested OCR. Implemented Tesseract.js OCR to extract selectable text from the rendered page images.
+
+Work Log:
+- Installed `tesseract.js@7.0.0` (pure WASM OCR, runs entirely in-browser with its own internal web worker).
+- Created `src/lib/ocr.ts`:
+  - `ocrCanvas(canvas)` → converts canvas to PNG blob, passes to Tesseract worker, returns words with bounding boxes.
+  - Worker config: `corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0'`, `langPath: 'https://tessdata.projectnaptha.com/4.0.0'` (the default `@tesseract.js-data` CDN URLs return 404; verified these alternatives return 200).
+  - Tesseract.js v7 doesn't populate `data.tsv` or `data.hocr` by default (both empty strings), and `data.words`/`data.blocks` tree may be empty. But `data.text` IS populated (94-95% confidence on test images). Fallback: if no word-level data, put the full page OCR text as a single "word" covering the entire canvas → the worker creates one invisible text box per page with all the text.
+- Updated `src/components/tool-page.tsx` (isPdfToWord branch):
+  - Replaced pdf.js `getTextContent()` with `ocrCanvas(canvas)` — OCR runs on the rendered page image, so it works for BOTH scanned (image-only) and text-based PDFs.
+  - Passes OCR words + image dimensions (`imgWidth`, `imgHeight`) to the worker.
+- Updated `processors['pdf-to-word']` in `src/lib/processing/worker-source.ts`:
+  - Reads `tdata.words` (array of `{text, x0, y0, x1, y1, confidence}` in image pixel coords, top-left origin).
+  - Converts pixel coords → EMU using `scaleX = pageWPt / imgW`, `scaleY = pageHPt / imgH` (no Y-flip needed — OCR and DOCX both use top-left origin).
+  - Creates one invisible (`<w:vanish/>`) text box per OCR word, positioned at the word's bounding box.
+  - For the full-page-text fallback (single word covering the page), creates one text box covering the entire page with all the OCR text.
+- Fixed bugs found during testing:
+  - `pdfjs.getPage(p)` → `pdfDoc.getPage(p)` (variable name typo).
+  - Download interceptor (`URL.createObjectURL` override) caused `RangeError: Maximum call stack` when Tesseract called it internally — fixed by using `orig.call(URL, blob)` and a guard flag.
+  - Initial test PDF was blank (SVG→sharp→PNG pipeline failed) — recreated by rendering text PDF to PNG via `pdftoppm`, then embedding PNGs into a new PDF via pdf-lib.
+- Added try/catch around `processing.run()` in handleProcess to surface errors as toasts.
+
+Stage Summary:
+- Browser-verified end-to-end via Agent Browser + LibreOffice + VLM:
+  - Uploaded a 94KB scanned PDF (2 pages, image-only, no text layer — verified by `pdftotext` returning empty).
+  - OCR ran on each page (Tesseract loaded core + eng.traineddata from CDN, ~15s first-time setup, ~5s per page after).
+  - OCR results: Page 1 confidence 94%, text="PDF to Word Conversion Test\nThis is a heading line..."; Page 2 confidence 95%, text="Second Page Title\nMore selectable text...".
+  - Output DOCX: 75,820 bytes, 2 page images + 2 invisible text boxes (vanish markers), containing 259 chars (page 1) + 111 chars (page 2) of selectable OCR text.
+  - LibreOffice converted the DOCX to PDF without errors (valid OOXML).
+  - VLM analysis: "No doubling/ghosting. The first 3 text lines are: 1. PDF to Word Conversion Test 2. This is a heading line... 3. Body paragraph one..." — the page image provides the visual, the invisible text provides selectability.
+  - Also tested with the text-based test PDF — works identically (OCR on the rendered image produces the same text).
+- The OCR text is invisible (vanish) so there are no visual artifacts/doubling, but fully:
+  - Selectable via Ctrl+A → Copy in Word/LibreOffice
+  - Searchable via Find & Replace
+- This is the same technique used by searchable/OCR PDFs and by iLovePDF for scanned documents.
+- First-time OCR setup downloads ~2MB WASM core + ~15MB language data from CDN; subsequent pages use the cached worker (~5s per page).

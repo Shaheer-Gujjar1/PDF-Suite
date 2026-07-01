@@ -1335,31 +1335,34 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       var pageHEmu = Math.round(pageHPt * EMU_PER_PT);
       bodyParts.push(buildPageImageXml(docPrId++, imgRelId, imgName, pageWEmu, pageHEmu));
 
-      /* 3. Selectable text overlay — one floating text box PER TEXT ITEM
-         (no merging). Each pdf.js item already carries its exact (x, y)
-         baseline position, width, and font size, so positioning the box
-         at those exact coordinates aligns the overlay text with the image
-         text pixel-for-pixel. */
-      if (tdata && tdata.items && tdata.items.length > 0) {
-        for (var ii = 0; ii < tdata.items.length; ii++) {
-          var item = tdata.items[ii];
-          if (!item || !item.str || !item.str.trim()) continue;
-          var itemX = item.x;
-          var itemY = item.y;
-          var itemFs = item.fontSize || 10;
-          var itemW = item.w && item.w > 0 ? item.w : (item.str.length * itemFs * 0.5);
-          /* Box left = exact PDF x. Box top = (page height − baseline y) − ascent.
-             ascent ≈ 0.75 × font size for typical fonts (Calibri/Helvetica/Arial). */
-          var xEmu = Math.round(itemX * EMU_PER_PT);
-          var yEmu = Math.round((pageHPt - itemY - itemFs * 0.75) * EMU_PER_PT);
-          /* Box width = text width + small padding so the last glyph isn't clipped. */
-          var wEmu = Math.max(Math.round((itemW + itemFs * 0.25) * EMU_PER_PT), Math.round(itemFs * EMU_PER_PT));
-          /* Box height = font size × 1.25 (line box). */
-          var hEmu = Math.round(itemFs * 1.25 * EMU_PER_PT);
-          var szHalfPt = Math.max(2, Math.round(itemFs * 2));
+      /* 3. Selectable text overlay — one floating text box PER OCR WORD.
+         The main thread ran Tesseract.js on the rendered page image, so each
+         word carries an (x0,y0,x1,y1) bounding box in IMAGE PIXEL coords
+         (top-left origin). Convert to EMU using the image->page scale.
+         OCR coords are top-left origin (same as DOCX), so no Y-flip needed. */
+      if (tdata && tdata.words && tdata.words.length > 0 && tdata.imgWidth && tdata.imgHeight) {
+        var imgW = tdata.imgWidth;
+        var imgH = tdata.imgHeight;
+        var scaleX = pageWPt / imgW;   /* image px -> PDF points */
+        var scaleY = pageHPt / imgH;
+        for (var wi = 0; wi < tdata.words.length; wi++) {
+          var w = tdata.words[wi];
+          if (!w || !w.text || !w.text.trim()) continue;
+          var wPt = w.x0 * scaleX;
+          var hPt = w.y0 * scaleY;
+          var widthPt = (w.x1 - w.x0) * scaleX;
+          var heightPt = (w.y1 - w.y0) * scaleY;
+          /* Font size in points ≈ word height (Tesseract bbox is tight
+             around the text). Use the larger of height or ~8pt minimum. */
+          var fsPt = Math.max(heightPt * 0.85, 6);
+          var xEmu = Math.round(wPt * EMU_PER_PT);
+          var yEmu = Math.round(hPt * EMU_PER_PT);
+          var wEmu = Math.max(Math.round(widthPt * EMU_PER_PT), Math.round(fsPt * EMU_PER_PT));
+          var hEmu = Math.round(heightPt * EMU_PER_PT);
+          var szHalfPt = Math.max(4, Math.round(fsPt * 2));
           if (yEmu < 0) yEmu = 0;
           if (xEmu < 0) xEmu = 0;
-          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(item.str), szHalfPt, '000000'));
+          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(w.text), szHalfPt, '000000'));
         }
       }
 
@@ -1369,8 +1372,8 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       }
 
       onProgress((pi + 1) / pageCount);
-      var itemCount = (tdata && tdata.items) ? tdata.items.length : 0;
-      log('Page ' + pno + '/' + pageCount + ' — ' + itemCount + ' text items');
+      var wordCount = (tdata && tdata.words) ? tdata.words.length : 0;
+      log('Page ' + pno + '/' + pageCount + ' - ' + wordCount + ' OCR words');
     }
 
     /* ---- Assemble document.xml ---- */
@@ -1436,7 +1439,7 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       name: 'converted.docx',
       data: toArrayBuffer(docxBytes),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      note: pageCount + ' page(s) · visual copy + hidden selectable text (Ctrl+A to select, Find to search)',
+      note: pageCount + ' page(s) · visual copy + OCR selectable text (Ctrl+A to select, Find to search)',
     });
   } else {
     /* Fallback: raw PDF input (main-thread render failed) — text-only DOCX. */
