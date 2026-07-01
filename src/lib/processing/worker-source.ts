@@ -1203,7 +1203,11 @@ function buildPageImageXml(docPrId, relId, imgName, wEmu, hEmu) {
 }
 
 /* Build the XML for a floating text box (in front of the image) carrying
-   one line of selectable text. Transparent fill so the image shows through. */
+   one text item's selectable text. The text is marked hidden (<w:vanish/>)
+   so it is NOT displayed — zero visual footprint, no doubling/ghosting over
+   the page image — but it remains in the document, fully searchable via
+   Find & Replace and copyable via Ctrl+A → Copy. This mirrors how
+   searchable/OCR PDFs use invisible-text rendering mode. */
 function buildTextBoxXml(docPrId, relHeight, xEmu, yEmu, wEmu, hEmu, text, fontSizeHalfPt, color) {
   return [
     '<w:p><w:r><w:drawing>',
@@ -1225,13 +1229,13 @@ function buildTextBoxXml(docPrId, relHeight, xEmu, yEmu, wEmu, hEmu, text, fontS
               '<a:ln><a:noFill/></a:ln>',
             '</wps:spPr>',
             '<wps:txbx><w:txbxContent>',
-              '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="0" w:lineRule="exact"/><w:jc w:val="left"/></w:pPr>',
-                '<w:r><w:rPr><w:sz w:val="' + fontSizeHalfPt + '"/><w:szCs w:val="' + fontSizeHalfPt + '"/><w:color w:val="' + color + '"/></w:rPr>',
+              '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="' + fontSizeHalfPt + '" w:lineRule="exact"/><w:jc w:val="left"/><w:contextualSpacing/></w:pPr>',
+                '<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="' + fontSizeHalfPt + '"/><w:szCs w:val="' + fontSizeHalfPt + '"/><w:color w:val="' + color + '"/><w:vanish/></w:rPr>',
                   '<w:t xml:space="preserve">' + text + '</w:t>',
                 '</w:r>',
               '</w:p>',
             '</w:txbxContent></wps:txbx>',
-            '<wps:bodyPr rot="0" spcFirstLastPara="0" vertOverflow="overflow" horzOverflow="overflow" vert="horz" wrap="square" anchor="t" anchorCtr="0"><a:noAutofit/></wps:bodyPr>',
+            '<wps:bodyPr rot="0" spcFirstLastPara="0" vertOverflow="overflow" horzOverflow="overflow" vert="horz" wrap="square" anchor="t" anchorCtr="0" lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr>',
           '</wps:wsp>',
         '</a:graphicData></a:graphic>',
       '</wp:anchor>',
@@ -1331,21 +1335,31 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       var pageHEmu = Math.round(pageHPt * EMU_PER_PT);
       bodyParts.push(buildPageImageXml(docPrId++, imgRelId, imgName, pageWEmu, pageHEmu));
 
-      /* 3. Selectable text overlay — one floating text box per text line. */
+      /* 3. Selectable text overlay — one floating text box PER TEXT ITEM
+         (no merging). Each pdf.js item already carries its exact (x, y)
+         baseline position, width, and font size, so positioning the box
+         at those exact coordinates aligns the overlay text with the image
+         text pixel-for-pixel. */
       if (tdata && tdata.items && tdata.items.length > 0) {
-        var lines = mergeTextLines(tdata.items);
-        for (var li = 0; li < lines.length; li++) {
-          var ln = lines[li];
-          var xEmu = Math.round(ln.x * EMU_PER_PT);
-          /* PDF y is the baseline (origin bottom-left). Convert to top-left
-             origin and offset by ~ascent so the box top sits on the cap line. */
-          var yEmu = Math.round((pageHPt - ln.y - ln.fontSize * 0.78) * EMU_PER_PT);
-          var wEmu = Math.round((ln.w + ln.fontSize * 0.5) * EMU_PER_PT);
-          var hEmu = Math.round(ln.fontSize * 1.3 * EMU_PER_PT);
-          var szHalfPt = Math.max(2, Math.round(ln.fontSize * 2));
+        for (var ii = 0; ii < tdata.items.length; ii++) {
+          var item = tdata.items[ii];
+          if (!item || !item.str || !item.str.trim()) continue;
+          var itemX = item.x;
+          var itemY = item.y;
+          var itemFs = item.fontSize || 10;
+          var itemW = item.w && item.w > 0 ? item.w : (item.str.length * itemFs * 0.5);
+          /* Box left = exact PDF x. Box top = (page height − baseline y) − ascent.
+             ascent ≈ 0.75 × font size for typical fonts (Calibri/Helvetica/Arial). */
+          var xEmu = Math.round(itemX * EMU_PER_PT);
+          var yEmu = Math.round((pageHPt - itemY - itemFs * 0.75) * EMU_PER_PT);
+          /* Box width = text width + small padding so the last glyph isn't clipped. */
+          var wEmu = Math.max(Math.round((itemW + itemFs * 0.25) * EMU_PER_PT), Math.round(itemFs * EMU_PER_PT));
+          /* Box height = font size × 1.25 (line box). */
+          var hEmu = Math.round(itemFs * 1.25 * EMU_PER_PT);
+          var szHalfPt = Math.max(2, Math.round(itemFs * 2));
           if (yEmu < 0) yEmu = 0;
           if (xEmu < 0) xEmu = 0;
-          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(ln.text), szHalfPt, '000000'));
+          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(item.str), szHalfPt, '000000'));
         }
       }
 
@@ -1422,7 +1436,7 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       name: 'converted.docx',
       data: toArrayBuffer(docxBytes),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      note: pageCount + ' page(s) · visual copy + selectable text',
+      note: pageCount + ' page(s) · visual copy + hidden selectable text (Ctrl+A to select, Find to search)',
     });
   } else {
     /* Fallback: raw PDF input (main-thread render failed) — text-only DOCX. */
