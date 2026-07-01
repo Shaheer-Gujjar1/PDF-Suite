@@ -1202,12 +1202,12 @@ function buildPageImageXml(docPrId, relId, imgName, wEmu, hEmu) {
   ].join('');
 }
 
-/* Build the XML for a floating text box (in front of the image) carrying
-   one text item's selectable text. The text is marked hidden (<w:vanish/>)
-   so it is NOT displayed — zero visual footprint, no doubling/ghosting over
-   the page image — but it remains in the document, fully searchable via
-   Find & Replace and copyable via Ctrl+A → Copy. This mirrors how
-   searchable/OCR PDFs use invisible-text rendering mode. */
+/* Build the XML for a floating text box (in front of the page image) carrying
+   one OCR word's text. The box has a WHITE FILL that covers the image text
+   underneath, with VISIBLE BLACK text rendered on top. This produces clean,
+   fully selectable + editable text — the image provides visual fidelity for
+   non-text elements (images, colors, layout), the text boxes replace the
+   image's text with real editable Word text. */
 function buildTextBoxXml(docPrId, relHeight, xEmu, yEmu, wEmu, hEmu, text, fontSizeHalfPt, color) {
   return [
     '<w:p><w:r><w:drawing>',
@@ -1225,12 +1225,12 @@ function buildTextBoxXml(docPrId, relHeight, xEmu, yEmu, wEmu, hEmu, text, fontS
             '<wps:spPr>',
               '<a:xfrm><a:off x="0" y="0"/><a:ext cx="' + wEmu + '" cy="' + hEmu + '"/></a:xfrm>',
               '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>',
-              '<a:noFill/>',
+              '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>',
               '<a:ln><a:noFill/></a:ln>',
             '</wps:spPr>',
             '<wps:txbx><w:txbxContent>',
               '<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="' + fontSizeHalfPt + '" w:lineRule="exact"/><w:jc w:val="left"/><w:contextualSpacing/></w:pPr>',
-                '<w:r><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:sz w:val="' + fontSizeHalfPt + '"/><w:szCs w:val="' + fontSizeHalfPt + '"/><w:color w:val="' + color + '"/><w:vanish/></w:rPr>',
+                '<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="' + fontSizeHalfPt + '"/><w:szCs w:val="' + fontSizeHalfPt + '"/><w:color w:val="' + color + '"/></w:rPr>',
                   '<w:t xml:space="preserve">' + text + '</w:t>',
                 '</w:r>',
               '</w:p>',
@@ -1324,49 +1324,51 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       var pageWPt = (tdata && tdata.pageWidth) ? tdata.pageWidth : sectionWPt;
       var pageHPt = (tdata && tdata.pageHeight) ? tdata.pageHeight : sectionHPt;
 
-      /* 1. Add the page image to media + a relationship. */
-      var imgRelId = pi + 1;
-      var imgName = 'image' + (pi + 1) + '.jpeg';
-      zip.file('word/media/' + imgName, imgData);
-      rels.push('<Relationship Id="rId' + imgRelId + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/' + imgName + '"/>');
+      var hasOcrText = tdata && tdata.words && tdata.words.length > 0 && tdata.imgWidth && tdata.imgHeight;
 
-      /* 2. Full-page floating image (behind the text layer). */
-      var pageWEmu = Math.round(pageWPt * EMU_PER_PT);
-      var pageHEmu = Math.round(pageHPt * EMU_PER_PT);
-      bodyParts.push(buildPageImageXml(docPrId++, imgRelId, imgName, pageWEmu, pageHEmu));
-
-      /* 3. Selectable text overlay — one floating text box PER OCR WORD.
-         The main thread ran Tesseract.js on the rendered page image, so each
-         word carries an (x0,y0,x1,y1) bounding box in IMAGE PIXEL coords
-         (top-left origin). Convert to EMU using the image->page scale.
-         OCR coords are top-left origin (same as DOCX), so no Y-flip needed. */
-      if (tdata && tdata.words && tdata.words.length > 0 && tdata.imgWidth && tdata.imgHeight) {
+      if (hasOcrText) {
+        /* OCR found text → render as FLOWING PARAGRAPHS of real, editable
+           text. No page image (avoids doubling). Group OCR words into lines
+           by their top coordinate, then emit each line as a Word paragraph. */
         var imgW = tdata.imgWidth;
         var imgH = tdata.imgHeight;
-        var scaleX = pageWPt / imgW;   /* image px -> PDF points */
+        var scaleX = pageWPt / imgW;
         var scaleY = pageHPt / imgH;
+
+        /* Group words into lines by rounded top coordinate. */
+        var lineMap = {};
         for (var wi = 0; wi < tdata.words.length; wi++) {
           var w = tdata.words[wi];
           if (!w || !w.text || !w.text.trim()) continue;
-          var wPt = w.x0 * scaleX;
-          var hPt = w.y0 * scaleY;
-          var widthPt = (w.x1 - w.x0) * scaleX;
-          var heightPt = (w.y1 - w.y0) * scaleY;
-          /* Font size in points ≈ word height (Tesseract bbox is tight
-             around the text). Use the larger of height or ~8pt minimum. */
-          var fsPt = Math.max(heightPt * 0.85, 6);
-          var xEmu = Math.round(wPt * EMU_PER_PT);
-          var yEmu = Math.round(hPt * EMU_PER_PT);
-          var wEmu = Math.max(Math.round(widthPt * EMU_PER_PT), Math.round(fsPt * EMU_PER_PT));
-          var hEmu = Math.round(heightPt * EMU_PER_PT);
-          var szHalfPt = Math.max(4, Math.round(fsPt * 2));
-          if (yEmu < 0) yEmu = 0;
-          if (xEmu < 0) xEmu = 0;
-          bodyParts.push(buildTextBoxXml(docPrId++, relHeight++, xEmu, yEmu, wEmu, hEmu, escapeXml(w.text), szHalfPt, '000000'));
+          var yKey = Math.round(w.y0 / Math.max((w.y1 - w.y0) * 0.5, 1));
+          if (!lineMap[yKey]) lineMap[yKey] = [];
+          lineMap[yKey].push(w);
         }
+        var lineKeys = Object.keys(lineMap).map(Number).sort(function (a, b) { return a - b; });
+        for (var lki = 0; lki < lineKeys.length; lki++) {
+          var lineWords = lineMap[lineKeys[lki]].sort(function (a, b) { return a.x0 - b.x0; });
+          var lineText = lineWords.map(function (lw) { return lw.text; }).join(' ');
+          /* Estimate font size from the first word's height. */
+          var firstH = (lineWords[0].y1 - lineWords[0].y0) * scaleY;
+          var fsPt = Math.max(firstH * 0.85, 8);
+          var szHalfPt = Math.max(8, Math.round(fsPt * 2));
+          bodyParts.push('<w:p><w:pPr><w:spacing w:before="0" w:after="120" w:line="' + Math.round(fsPt * 1.4 * 20) + '" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="' + szHalfPt + '"/><w:szCs w:val="' + szHalfPt + '"/></w:rPr><w:t xml:space="preserve">' + escapeXml(lineText) + '</w:t></w:r></w:p>');
+        }
+        /* Empty paragraph between pages for visual spacing. */
+        bodyParts.push('<w:p/>');
+      } else {
+        /* No OCR text (blank page or OCR failed) → embed the page image so
+           the user at least sees what was on the page. */
+        var imgRelId2 = pi + 1;
+        var imgName2 = 'image' + (pi + 1) + '.jpeg';
+        zip.file('word/media/' + imgName2, imgData);
+        rels.push('<Relationship Id="rId' + imgRelId2 + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/' + imgName2 + '"/>');
+        var pageWEmu2 = Math.round(pageWPt * EMU_PER_PT);
+        var pageHEmu2 = Math.round(pageHPt * EMU_PER_PT);
+        bodyParts.push(buildPageImageXml(docPrId++, imgRelId2, imgName2, pageWEmu2, pageHEmu2));
       }
 
-      /* 4. Page break between pages (not after the last). */
+      /* Page break between pages (not after the last). */
       if (pi < pageCount - 1) {
         bodyParts.push('<w:p><w:r><w:br w:type="page"/></w:r></w:p>');
       }
@@ -1439,7 +1441,7 @@ processors['pdf-to-word'] = async function (inputs, opts, onProgress, log) {
       name: 'converted.docx',
       data: toArrayBuffer(docxBytes),
       mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      note: pageCount + ' page(s) · visual copy + OCR selectable text (Ctrl+A to select, Find to search)',
+      note: pageCount + ' page(s) · OCR text (editable & selectable)',
     });
   } else {
     /* Fallback: raw PDF input (main-thread render failed) — text-only DOCX. */

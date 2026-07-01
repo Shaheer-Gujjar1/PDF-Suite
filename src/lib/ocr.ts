@@ -109,18 +109,31 @@ export async function ocrCanvas(
     }
   }
 
-  // Fallback: if blocks traversal found no words but we have text, create a
-  // single "word" with the full page text covering the entire canvas. The
-  // worker will render it as one invisible text box — selectable + searchable.
+  // Fallback: if blocks traversal found no word bboxes but we have text,
+  // split the text into lines and create one "word" per line, stacked
+  // vertically down the page. Each line becomes a white text box with
+  // visible editable text — selectable, editable, and covering the image
+  // text line-by-line. Estimate line height from the number of non-empty
+  // lines vs. canvas height.
   if (words.length === 0 && data.text && data.text.trim()) {
-    words.push({
-      text: data.text.trim(),
-      x0: 0,
-      y0: 0,
-      x1: canvas.width,
-      y1: canvas.height,
-      confidence: data.confidence || 0,
-    })
+    const textLines = data.text.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0)
+    if (textLines.length > 0) {
+      // Reserve top 8% as margin, distribute lines in the remaining 84%.
+      const topMargin = canvas.height * 0.08
+      const usableH = canvas.height * 0.84
+      const lineH = Math.min(usableH / textLines.length, canvas.height * 0.05)
+      const fontSize = lineH * 0.75
+      for (let i = 0; i < textLines.length; i++) {
+        words.push({
+          text: textLines[i],
+          x0: canvas.width * 0.05,
+          y0: topMargin + i * lineH,
+          x1: canvas.width * 0.95,
+          y1: topMargin + (i + 1) * lineH,
+          confidence: data.confidence || 0,
+        })
+      }
+    }
   }
 
 

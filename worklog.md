@@ -303,3 +303,30 @@ Stage Summary:
   - At 45s: OCR completed, Download buttons appeared ✓
   - Lint clean ✓
 - The button was always working — the issue was missing visual feedback during the main-thread OCR phase. Now users see a clear "Rendering pages & running OCR…" message with a spinner and disabled button.
+
+---
+Task ID: pdf-to-word-editable-text
+Agent: main (orchestrator)
+Task: "again no text is selectable or editable" — the `<w:vanish/>` (hidden text) approach failed because hidden text is NOT included in selection/copy by default in modern Word/LibreOffice.
+
+Work Log:
+- Root cause: `<w:vanish/>` marks text as hidden formatting. By default, Word and LibreOffice do NOT include hidden text in Ctrl+A selection or copy operations — the user must manually enable "Show hidden text" in options. So the invisible-text approach that worked for "no doubling" broke selectability.
+- Tried an intermediate approach: white-fill text boxes with visible black text over the image. This caused doubling/ghosting because: (1) OCR word bboxes don't perfectly match the image text positions, (2) Arial (overlay font) vs Helvetica (image font) have different glyph widths, so the black OCR text doesn't fully cover the image text.
+- Final solution: **drop the page image entirely for pages where OCR succeeds, and emit the OCR text as FLOWING PARAGRAPHS in the main document body.** This produces a pure-text DOCX where:
+  - Text is real, editable, selectable (it's in `<w:p>` paragraphs, not text boxes)
+  - No image → no doubling/ghosting
+  - Layout is approximated (text reflows into paragraphs grouped by OCR line) — the tradeoff for full editability
+- Changes to `processors['pdf-to-word']` in `src/lib/processing/worker-source.ts`:
+  - For each page: if OCR found words, group them by top-coordinate into lines, emit each line as a `<w:p>` paragraph with Arial font + estimated font size from OCR word height. No image, no text boxes.
+  - If OCR found NO text (blank page or OCR failed), fall back to embedding the page image (so the user at least sees the page content).
+- Removed `<w:vanish/>` from buildTextBoxXml (no longer used for OCR text, but kept the helper for potential future use). Changed font from Calibri to Arial (closer to Helvetica).
+- Updated the OCR fallback in `src/lib/ocr.ts`: instead of one giant "word" covering the whole page (which would create one giant white box), split OCR text into lines and create one "word" per line, stacked vertically with estimated positions.
+
+Stage Summary:
+- Browser-verified with BOTH a text-based PDF and a scanned (image-only) PDF:
+  - Text-based PDF: 2 pages → 3830-byte DOCX with 8 real, editable paragraphs in the main body (no images, no text boxes). VLM: "clean, readable (no doubling/ghosting), fully selectable/editable (not an image)."
+  - Scanned PDF: 2 pages → identical clean output (3830 bytes, 8 paragraphs). OCR confidence 94-95%.
+  - LibreOffice opened both DOCX files without errors and converted to PDF cleanly.
+  - VLM final: "clean with no doubling, images, or artifacts" — pure editable text.
+- The output is now a real Word document with editable text — not an image with hidden text. Users can select (Ctrl+A), edit (click and type), and search (Ctrl+F) the text normally.
+- Tradeoff: the output no longer preserves the exact visual layout (fonts, positions, colors, images) of the original PDF — it's reflowed text. This is the fundamental tradeoff between "visual fidelity" (image-based) and "editability" (text-based). The user explicitly asked for selectable + editable text, so editability wins.
