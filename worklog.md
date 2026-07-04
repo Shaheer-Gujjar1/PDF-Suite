@@ -330,3 +330,43 @@ Stage Summary:
   - VLM final: "clean with no doubling, images, or artifacts" — pure editable text.
 - The output is now a real Word document with editable text — not an image with hidden text. Users can select (Ctrl+A), edit (click and type), and search (Ctrl+F) the text normally.
 - Tradeoff: the output no longer preserves the exact visual layout (fonts, positions, colors, images) of the original PDF — it's reflowed text. This is the fundamental tradeoff between "visual fidelity" (image-based) and "editability" (text-based). The user explicitly asked for selectable + editable text, so editability wins.
+
+---
+Task ID: remove-pdf-to-word-fix-pdf-to-excel
+Agent: main (orchestrator)
+Task: Remove PDF to Word tool completely (user said it isn't perfect). Add first-page preview to PDF to Excel. Fix PDF to Excel conversion issues (output wasn't matching the uploaded PDF).
+
+Work Log:
+- **Removed PDF to Word tool completely:**
+  - Removed the tool entry from `src/lib/tools.ts` (and the now-unused `FileType` icon import).
+  - Removed `'pdf-to-word'` from `src/lib/processing/registry.ts` and `src/lib/processing/types.ts` (ProcessorType union).
+  - Removed all `isPdfToWord` references from `src/components/tool-page.tsx`: the flag, the wordOrder sync (kept for Word to PDF), the wordFiles derivation (kept for Word to PDF), the needsPrepare/prepareMsg branch, the entire isPdfToWord handleProcess branch (~90 lines of OCR pipeline), the view rendering, and the hasOptions exclusion.
+  - Removed the `import { PdfToWordView }` line.
+  - Deleted `src/components/tools/pdf-to-word-view.tsx` and `src/lib/ocr.ts`.
+  - Removed the `processors['pdf-to-word']` block + all its helpers (getDocx, getJSZip, escapeXml, EMU_PER_PT, TWIP_PER_PT, mergeTextLines, buildPageImageXml, buildTextBoxXml) from `src/lib/processing/worker-source.ts`.
+  - Removed `docx` and `jszip` from `WORKER_IMPORT_URLS` in `src/lib/processing/libs.ts` (no longer needed).
+  - Uninstalled `tesseract.js` npm package.
+  - Deep link `/#/pdf-to-word` now shows a graceful "Tool not found" message (no crash).
+  - Homepage "Convert from PDF" category now shows only PDF to Images + PDF to Excel.
+
+- **Added first-page preview to PDF to Excel:**
+  - Created `src/components/tools/pdf-to-excel-view.tsx` with a `PdfToExcelView` component.
+  - Uses the existing `usePdfFirstPages` hook to render a first-page thumbnail of each uploaded PDF in a card grid (teal accent, XLSX badge, page count, file name + size, remove button).
+  - Wired into `tool-page.tsx` with `isPdfToExcel` flag + conditional rendering + `onRemove` handler.
+
+- **Fixed PDF to Excel conversion (was producing jumbled single-column output):**
+  - Old approach: split each text line by `/\t| {2,}/` (tabs or 2+ spaces). This was too crude — it merged genuine table columns when there were no double-spaces, and split words within a cell when there were.
+  - New approach: **x-coordinate-based column detection.**
+    - Rewrote `extractTextPages()` to return structured data: each page is an array of lines; each line is an array of `{x, text}` items (sorted left-to-right). Previously it returned joined strings.
+    - Added `detectColumns(pageLines)`: collects all text-item x-start coordinates, sorts them, and clusters x-starts within 25pt of each other into one column. 25pt ≈ 3-4 characters — wide enough to merge word-fragments of the same cell (e.g. "New" + "York"), narrow enough to keep genuine table columns separate.
+    - Added `buildGrid(pageLines, cols)`: assigns each text item to the column whose start is the largest x ≤ the item's x; concatenates multiple items in the same cell with spaces; drops fully-empty rows; drops fully-empty columns (phantom columns from over-clustering).
+  - Added auto column-width sizing in the processor: `ws['!cols']` set to `Math.min(Math.max(contentLen + 2, 8), 50)` per column.
+  - Updated the output `note` to include cell count.
+
+Stage Summary:
+- Browser-verified:
+  - PDF to Word is fully removed (homepage, deep link, registry, worker). `/#/pdf-to-word` shows "Tool not found" gracefully.
+  - PDF to Excel shows first-page preview thumbnails for each uploaded PDF (verified via DOM: img element with data URL, 149x198px).
+  - Conversion tested with a 5-row × 4-column table PDF (Name/Age/City/Salary): output XLSX is 6 rows × 4 columns, perfectly matching the original table. "New York" correctly in one cell, no phantom empty columns, auto-sized column widths.
+  - Lint clean, worker syntax valid, dev log clean.
+- The PDF to Excel conversion now uses real positional data (x-coordinates) instead of guessing columns from whitespace, so tabular PDFs are extracted into proper rows × columns.

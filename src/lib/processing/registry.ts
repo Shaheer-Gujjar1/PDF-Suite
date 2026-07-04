@@ -16,7 +16,6 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   unlock: 'unlock',
   'word-to-pdf': 'word-to-pdf',
   'excel-to-pdf': 'excel-to-pdf',
-  'pdf-to-word': 'pdf-to-word',
   'pdf-to-excel': 'pdf-to-excel',
   'page-numbers': 'page-numbers',
   watermark: 'watermark',

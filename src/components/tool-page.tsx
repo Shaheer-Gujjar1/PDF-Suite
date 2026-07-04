@@ -30,7 +30,7 @@ import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/imag
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
-import { PdfToWordView, type PdfFile } from '@/components/tools/pdf-to-word-view'
+import { PdfToExcelView } from '@/components/tools/pdf-to-excel-view'
 import { renderDocxToPages } from '@/lib/docx-renderer'
 import { renderXlsxToPages } from '@/lib/xlsx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
@@ -104,7 +104,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isWordToPdf = tool.id === 'word-to-pdf'
   const isExcelToPdf = tool.id === 'excel-to-pdf'
   const isHtmlToPdf = tool.id === 'html-to-pdf'
-  const isPdfToWord = tool.id === 'pdf-to-word'
+  const isPdfToExcel = tool.id === 'pdf-to-excel'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -145,9 +145,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setHtmlConfig({ html: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
   }, [tool.id])
 
-  // Sync mergeOrder/wordOrder/pdfToWordOrder when files change
+  // Sync mergeOrder/wordOrder when files change
   React.useEffect(() => {
-    if (isMerge || isWordToPdf || isPdfToWord) {
+    if (isMerge || isWordToPdf) {
       const fileIds = new Set(files.map((f) => f.id))
       const setter = isMerge ? setMergeOrder : setWordOrder
       setter((prev) => {
@@ -156,7 +156,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         return [...kept, ...newIds]
       })
     }
-  }, [files, isMerge, isWordToPdf, isPdfToWord])
+  }, [files, isMerge, isWordToPdf])
 
   // Ordered merge files
   const mergeFiles: MergeFile[] = isMerge
@@ -166,8 +166,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         .map((f) => ({ id: f.id, file: f.file }))
     : []
 
-  // Ordered word/pdf-to-word files
-  const wordFiles: WordFile[] = (isWordToPdf || isPdfToWord)
+  // Ordered word files (Word to PDF)
+  const wordFiles: WordFile[] = isWordToPdf
     ? wordOrder
         .map((id) => files.find((f) => f.id === id))
         .filter((f): f is QueuedFile => !!f)
@@ -197,10 +197,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let actualProcessor = processor
 
     // Tools that need main-thread pre-rendering before run() — show feedback.
-    const needsPrepare = isHtmlToPdf || isPdfToWord || isWordToPdf || isExcelToPdf
+    const needsPrepare = isHtmlToPdf || isWordToPdf || isExcelToPdf
     if (needsPrepare) {
       setPreparing(true)
-      setPrepareMsg(isPdfToWord ? 'Rendering pages & running OCR…' : 'Rendering pages…')
+      setPrepareMsg('Rendering pages…')
       // Yield so React paints the preparing state before the heavy work starts.
       await new Promise((r) => setTimeout(r, 0))
     }
@@ -317,100 +317,6 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
       mode = 'single'
       singleLabel = 'HTML → PDF output'
-    } else if (isPdfToWord) {
-      // PDF to Word: render each page to an image on the MAIN THREAD, then
-      // run OCR (Tesseract.js) on the image to extract selectable text with
-      // word bounding boxes. Send page image + OCR words to the worker,
-      // which builds a DOCX with the image as a full-page background and
-      // floating text boxes (hidden, selectable) positioned over each OCR
-      // word. Works for both scanned (image-only) and text-based PDFs.
-      const orderedFiles = wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
-      const { loadPdfJs } = await import('@/hooks/use-pdf')
-      const { ocrCanvas } = await import('@/lib/ocr')
-      const pdfjs = await loadPdfJs()
-
-      for (const qf of orderedFiles) {
-        try {
-          const buf = await qf.file.arrayBuffer()
-          const pdfDoc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise
-          const pageCount = pdfDoc.numPages
-
-          for (let p = 1; p <= pageCount; p++) {
-            const page = await pdfDoc.getPage(p)
-            // Unscaled viewport = PDF user-space units (points). Used for
-            // page size + converting OCR pixel coords to point coords.
-            const pointViewport = page.getViewport({ scale: 1 })
-            const pageWPt = pointViewport.width
-            const pageHPt = pointViewport.height
-            const renderScale = 2.0
-            const renderViewport = page.getViewport({ scale: renderScale })
-            const imgW = Math.ceil(renderViewport.width)
-            const imgH = Math.ceil(renderViewport.height)
-
-            // Render page to canvas (main thread - fonts work correctly)
-            const canvas = document.createElement('canvas')
-            canvas.width = imgW
-            canvas.height = imgH
-            const ctx = canvas.getContext('2d')!
-            ctx.fillStyle = '#ffffff'
-            ctx.fillRect(0, 0, imgW, imgH)
-            await page.render({ canvasContext: ctx, viewport: renderViewport }).promise
-
-            // Run OCR (Tesseract.js) on the rendered canvas -> word bounding
-            // boxes in image pixel coordinates (top-left origin). This works
-            // for scanned (image-only) PDFs where pdf.js text extraction
-            // returns nothing, AND for text-based PDFs.
-            let ocrWords: { text: string; x0: number; y0: number; x1: number; y1: number; confidence: number }[] = []
-            try {
-              const ocrResult = await ocrCanvas(canvas)
-              ocrWords = ocrResult.words.filter(w => w.text.trim() && w.confidence > 40)
-            } catch (e) {
-              console.error('OCR failed for page', p, e)
-            }
-
-            // Convert canvas to JPEG for the page image.
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
-            const base64 = dataUrl.split(',')[1]
-            const binary = atob(base64)
-            const arr = new Uint8Array(binary.length)
-            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
-            inputs.push({
-              fileName: `page-${p}.jpg`,
-              data: arr.buffer.slice(0),
-              size: arr.buffer.byteLength,
-            })
-
-            // Send OCR words + page/image dimensions as a separate input.
-            // Coordinates are in image pixels (top-left origin); the worker
-            // converts to EMU using imgW/imgH -> page dimensions.
-            const ocrJson = JSON.stringify({
-              page: p,
-              words: ocrWords,
-              pageWidth: pageWPt,
-              pageHeight: pageHPt,
-              imgWidth: imgW,
-              imgHeight: imgH,
-            })
-            const ocrEncoded = new TextEncoder().encode(ocrJson)
-            inputs.push({
-              fileName: `__text_${p}__.json`,
-              data: ocrEncoded.buffer.slice(0),
-              size: ocrEncoded.buffer.byteLength,
-            })
-
-            try { await page.cleanup() } catch (_) {}
-          }
-          try { await pdfDoc.destroy() } catch (_) {}
-        } catch (e) {
-          console.error('PDF render failed, sending raw to worker:', e)
-          const data = await qf.file.arrayBuffer()
-          inputs.push({ fileName: qf.file.name, data, size: data.byteLength })
-        }
-      }
-      actualProcessor = 'pdf-to-word'
-      runOptions = { ...options, _mainThreadRendered: true }
-      mode = 'single'
-      singleLabel = 'PDF -> Word output'
     } else if (isWordToPdf) {
       // Word to PDF: pre-render DOCX to page images on the main thread
       // (using mammoth + html2canvas), then send images to the worker
@@ -711,11 +617,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onRemove={handleWordRemove}
             onAddMore={handleAddMore}
           />
-        ) : isPdfToWord && files.length > 0 ? (
-          <PdfToWordView
-            files={wordFiles}
-            onReorder={handleWordReorder}
-            onRemove={handleWordRemove}
+        ) : isPdfToExcel && files.length > 0 ? (
+          <PdfToExcelView
+            files={files}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
           />
         ) : isInteractive && files.length > 0 ? (
           <InteractiveEditor
@@ -756,7 +661,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isPdfToWord && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isPdfToExcel && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}

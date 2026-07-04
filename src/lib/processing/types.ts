@@ -27,7 +27,6 @@ export type ProcessorType =
   // Step 5 — Office conversions
   | 'word-to-pdf'
   | 'excel-to-pdf'
-  | 'pdf-to-word'
   | 'pdf-to-excel'
   // Step 6 — Interactive tools
   | 'organize'
