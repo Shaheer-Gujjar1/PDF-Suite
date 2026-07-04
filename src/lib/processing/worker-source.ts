@@ -1232,52 +1232,108 @@ async function extractTextPages(data, rawBytes, logFn) {
           } catch (e) { /* inflate failed — skip this stream */ }
         }
       }
-      /* Parse each content stream for colors + rects. */
+      /* Parse each content stream for colors + rects + text positions.
+         Tracks CTM (current transform matrix) via q/Q/cm so background rect
+         coordinates are converted to page space. Tracks Tf (font name) and
+         Tm (text matrix) to assign colors + bold/italic to text items by
+         position (matched against pdf.js content.items later). */
+      function matMul(m1, m2) {
+        return [
+          m1[0]*m2[0] + m1[2]*m2[1],
+          m1[1]*m2[0] + m1[3]*m2[1],
+          m1[0]*m2[2] + m1[2]*m2[3],
+          m1[1]*m2[2] + m1[3]*m2[3],
+          m1[0]*m2[4] + m1[2]*m2[5] + m1[4],
+          m1[1]*m2[4] + m1[3]*m2[5] + m1[5]
+        ];
+      }
+      function transformPt(m, x, y) {
+        return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]];
+      }
       for (var cs = 0; cs < contentStreams.length; cs++) {
         var stream = contentStreams[cs];
         var curFill = [0, 0, 0];
-        var pathPoints = [];  /* collect m/l points for path-based rects */
-        var pageTextColors = [];
+        var pathPoints = [];
+        var pageTextItems = [];
         var pageBgRects = [];
-        /* Token regex: matches color ops (rg/g), rect (re), path ops (m/l/h),
-           fill (f/B), text (Tj/TJ). Backslashes doubled for template literal. */
-        var tokenRe = /(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(rg|g)\\b|(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+re\\b|(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(m|l)\\b|(re|f|B|h|Tj|TJ)\\b/g;
-        var tm;
-        while ((tm = tokenRe.exec(stream)) !== null) {
-          if (tm[4] === 'rg') {
-            curFill = [parseFloat(tm[1]), parseFloat(tm[2]), parseFloat(tm[3])];
-          } else if (tm[4] === 'g') {
-            curFill = [parseFloat(tm[1]), parseFloat(tm[1]), parseFloat(tm[1])];
-          } else if (tm[8] === 're' && tm[5] !== undefined) {
-            /* re = rectangle shortcut: x y w h re */
-            pathPoints = [{x: parseFloat(tm[5]), y: parseFloat(tm[6])}, {x: parseFloat(tm[5]) + parseFloat(tm[7]), y: parseFloat(tm[6])}, {x: parseFloat(tm[5]) + parseFloat(tm[7]), y: parseFloat(tm[6]) + parseFloat(tm[8])}, {x: parseFloat(tm[5]), y: parseFloat(tm[6]) + parseFloat(tm[8])}];
-          } else if (tm[11] === 'm') {
-            /* moveTo: start new path */
-            pathPoints = [{x: parseFloat(tm[9]), y: parseFloat(tm[10])}];
-          } else if (tm[11] === 'l') {
-            /* lineTo: add point */
-            pathPoints.push({x: parseFloat(tm[9]), y: parseFloat(tm[10])});
-          } else if (tm[12] === 'h') {
-            /* closePath: path is ready to fill */
-            /* keep pathPoints for the next fill op */
-          } else if (tm[12] === 'f' || tm[12] === 'B') {
-            /* fill: if path is a rectangle (4 points forming a rect), record it */
+        var ctmStack = [[1,0,0,1,0,0]];
+        function curCtm() { return ctmStack[ctmStack.length - 1]; }
+        var textMatrix = [1,0,0,1,0,0];
+        var textLeading = 0;
+        var curFontName = '';
+
+        /* Unified regex: matches PDF operators in order. Alternatives:
+           1-4: rg/g color (3 nums + op)
+           5-9: re rect (4 nums + op)
+           10-11: m/l path (2 nums + op)
+           12-18: cm/tm (6 nums + op)
+           19-21: td (2 nums + op)
+           22-24: Tf (/name + num + op)
+           25-26: tl (1 num + op)
+           27: single-char ops (q/Q/h/f/B)
+           28: Tj/TJ
+           29: T*
+           30: BT/ET */
+        var ure = /(?:(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(rg|g))|(?:(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(re))|(?:(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(m|l))|(?:(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(cm|Tm))|(?:(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(Td))|(?:\\/([^\\s]+)\\s+(-?\\d+\\.?\\d*)\\s+(Tf))|(?:(-?\\d+\\.?\\d*)\\s+(TL))|(q|Q|h|f|B)\\b|(Tj|TJ)\\b|(T\\*)\\b|(BT|ET)\\b/g;
+        var um;
+        while ((um = ure.exec(stream)) !== null) {
+          if (um[4]) {
+            if (um[4] === 'rg') curFill = [parseFloat(um[1]), parseFloat(um[2]), parseFloat(um[3])];
+            else curFill = [parseFloat(um[1]), parseFloat(um[1]), parseFloat(um[1])];
+          } else if (um[9] === 're') {
+            var rx = parseFloat(um[5]), ry = parseFloat(um[6]), rw = parseFloat(um[7]), rh = parseFloat(um[8]);
+            pathPoints = [{x:rx,y:ry},{x:rx+rw,y:ry},{x:rx+rw,y:ry+rh},{x:rx,y:ry+rh}];
+          } else if (um[12] === 'm') {
+            pathPoints = [{x:parseFloat(um[10]), y:parseFloat(um[11])}];
+          } else if (um[12] === 'l') {
+            pathPoints.push({x:parseFloat(um[10]), y:parseFloat(um[11])});
+          } else if (um[19] === 'cm') {
+            var cmMat = [parseFloat(um[13]),parseFloat(um[14]),parseFloat(um[15]),parseFloat(um[16]),parseFloat(um[17]),parseFloat(um[18])];
+            ctmStack[ctmStack.length-1] = matMul(cmMat, curCtm());
+          } else if (um[19] === 'Tm') {
+            textMatrix = [parseFloat(um[13]),parseFloat(um[14]),parseFloat(um[15]),parseFloat(um[16]),parseFloat(um[17]),parseFloat(um[18])];
+          } else if (um[22] === 'Td') {
+            textMatrix[4] += parseFloat(um[20]);
+            textMatrix[5] += parseFloat(um[21]);
+          } else if (um[25] === 'Tf') {
+            curFontName = um[23] || '';
+          } else if (um[27] === 'TL') {
+            textLeading = parseFloat(um[26]);
+          } else if (um[28] === 'q') {
+            ctmStack.push(curCtm().slice());
+          } else if (um[28] === 'Q') {
+            if (ctmStack.length > 1) ctmStack.pop();
+          } else if (um[28] === 'f' || um[28] === 'B') {
             if (pathPoints.length >= 4) {
-              var xs = pathPoints.map(function(p) { return p.x; });
-              var ys = pathPoints.map(function(p) { return p.y; });
-              var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
-              var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
-              var w = maxX - minX, h = maxY - minY;
-              if (w > 2 && h > 2) {
-                pageBgRects.push({ x: minX, y: minY, w: w, h: h, color: curFill.slice() });
+              var uxs = pathPoints.map(function(p) { return p.x; });
+              var uys = pathPoints.map(function(p) { return p.y; });
+              var uminX = Math.min.apply(null, uxs), umaxX = Math.max.apply(null, uxs);
+              var uminY = Math.min.apply(null, uys), umaxY = Math.max.apply(null, uys);
+              var ubw = umaxX - uminX, ubh = umaxY - uminY;
+              if (ubw > 2 && ubh > 2) {
+                var uctm = curCtm();
+                var up1 = transformPt(uctm, uminX, uminY);
+                var up2 = transformPt(uctm, umaxX, umaxY);
+                pageBgRects.push({ x: up1[0], y: up1[1], w: up2[0]-up1[0], h: up2[1]-up1[1], color: curFill.slice() });
               }
             }
             pathPoints = [];
-          } else if (tm[12] === 'Tj' || tm[12] === 'TJ') {
-            pageTextColors.push(curFill.slice());
+          } else if (um[29] === 'Tj' || um[29] === 'TJ') {
+            var utrm = matMul(textMatrix, curCtm());
+            var ufontLower = (curFontName || '').toLowerCase();
+            pageTextItems.push({
+              x: utrm[4], y: utrm[5],
+              color: curFill.slice(),
+              bold: /bold|black|heavy|semibold/.test(ufontLower),
+              italic: /italic|oblique/.test(ufontLower)
+            });
+          } else if (um[30] === 'T*') {
+            textMatrix[5] -= textLeading;
+          } else if (um[31] === 'BT') {
+            textMatrix = [1,0,0,1,0,0];
           }
         }
-        rawStreamColors.push({ textColors: pageTextColors, bgRects: pageBgRects });
+        rawStreamColors.push({ textItems: pageTextItems, bgRects: pageBgRects });
       }
     } catch (e) {
       /* Raw stream parsing failed — continue without colors. */
@@ -1289,51 +1345,66 @@ async function extractTextPages(data, rawBytes, logFn) {
     var content = await page.getTextContent();
     var styles = content.styles || {};
     var contentItems = content.items;
-    var textColors = [];      /* color per content item index */
-    var bgRects = [];         /* filled rectangles (cell backgrounds) */
+    var bgRects = [];
 
-    /* Use colors from the raw stream parse for this page (1-indexed page p
-       corresponds to contentStreams[p-1]). */
+    /* Use the raw stream parse for this page (page p → contentStreams[p-1]). */
     var rawPageData = rawStreamColors[p - 1];
-    if (rawPageData) {
-      bgRects = rawPageData.bgRects;
-      for (var rc = 0; rc < rawPageData.textColors.length && rc < contentItems.length; rc++) {
-        textColors[rc] = rawPageData.textColors[rc];
-      }
-    }
+    var rawTextItems = rawPageData ? rawPageData.textItems : [];
+    if (rawPageData) bgRects = rawPageData.bgRects;
 
-    /* Walk the operator list to track fill color at each text op + collect
-       background rectangles. The showText/showSpacedText ops in the operator
-       list are in the same order as content.items, so we can assign colors
-       by index. */
-    /* If raw-stream color matching fell short, fill remaining text colors
-       with black (default). */
-    for (var fi = 0; fi < contentItems.length; fi++) {
-      if (!textColors[fi]) textColors[fi] = [0, 0, 0];
-    }
-
-    /* Build text items with colors, grouped into lines by y. */
+    /* Build text items with colors + bold/italic, matched by position to
+       the raw stream's text items. pdf.js items have transform[4]/[5] as
+       page-space x/y; raw stream items have x/y from Tm×CTM. We match each
+       pdf.js item to the nearest raw stream item within a tolerance. */
+    var usedRaw = new Array(rawTextItems.length).fill(false);
     var lines = {};
     for (var i = 0; i < contentItems.length; i++) {
       var item = contentItems[i];
       var str = item.str || '';
       if (!str) continue;
-      var yKey = Math.round(-item.transform[5] / 2) * 2;
+      var ix = item.transform[4];
+      var iy = item.transform[5];
+      var yKey = Math.round(-iy / 2) * 2;
       if (!lines[yKey]) lines[yKey] = [];
-      var fontName = item.fontName || '';
-      var fontStyle = styles[fontName] || {};
-      var combined = ((fontStyle.fontFamily || '') + ' ' + fontName).toLowerCase();
-      var bold = /bold|black|heavy|semibold/.test(combined);
-      var italic = /italic|oblique/.test(combined);
+
+      /* Find nearest raw stream text item by position. */
+      var bestIdx = -1;
+      var bestDist = Infinity;
+      for (var ri = 0; ri < rawTextItems.length; ri++) {
+        if (usedRaw[ri]) continue;
+        var dx = rawTextItems[ri].x - ix;
+        var dy = rawTextItems[ri].y - iy;
+        var dist = dx * dx + dy * dy;
+        if (dist < bestDist && dist < 400) {  /* within 20pt */
+          bestDist = dist;
+          bestIdx = ri;
+        }
+      }
+      var color = [0, 0, 0];
+      var bold = false;
+      var italic = false;
+      if (bestIdx >= 0) {
+        usedRaw[bestIdx] = true;
+        color = rawTextItems[bestIdx].color;
+        bold = rawTextItems[bestIdx].bold;
+        italic = rawTextItems[bestIdx].italic;
+      } else {
+        /* Fallback: try pdf.js styles for bold/italic. */
+        var fontName = item.fontName || '';
+        var fontStyle = styles[fontName] || {};
+        var combined = ((fontStyle.fontFamily || '') + ' ' + fontName).toLowerCase();
+        bold = /bold|black|heavy|semibold/.test(combined);
+        italic = /italic|oblique/.test(combined);
+      }
       var fontSize = Math.hypot(item.transform[0], item.transform[1]) || Math.hypot(item.transform[2], item.transform[3]) || (item.height || 10);
       lines[yKey].push({
-        x: item.transform[4],
-        y: item.transform[5],
+        x: ix,
+        y: iy,
         text: str,
         bold: bold,
         italic: italic,
         fontSize: fontSize,
-        color: textColors[i] || [0, 0, 0]
+        color: color
       });
     }
     var sortedYs = Object.keys(lines).map(Number).sort(function (a, b) { return a - b; });

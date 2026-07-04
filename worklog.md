@@ -431,3 +431,27 @@ Stage Summary:
 - Bold/italic from raw stream font names not yet wired up.
 - The conversion works without hanging, produces valid XLSX with correct data + text colors + auto-sized columns/rows + correct filename pattern.
 - Lint clean, worker syntax valid.
+
+---
+Task ID: pdf-to-excel-colors-phase2
+Agent: main (orchestrator)
+Task: Phase 2 — complete background fill matching (cm transform tracking), bold/italic from Tf font names, and fix text color alignment. Separate development phase.
+
+Work Log:
+- Rewrote content stream parser with a single unified regex (case-sensitive, no `i` flag — PDF operators are case-sensitive: `m`≠`M`, `g`≠`G`).
+- Fixed regex group indices (were off by one due to miscounting capture groups).
+- Tracked `cm` (concat matrix) via q/Q stack so background rect coordinates are transformed to page space.
+- Tracked `Tf` (font name) for bold/italic detection from raw stream font names (e.g. `/Helvetica-Bold-7098480789`).
+- Tracked `Tm` (text matrix) + `Td`/`T*` for text positions, matched by position (within 20pt) to pdf.js content.items instead of fragile index counting.
+- Applied `cm` transform to background rect corners before recording → rects now match text positions in page space.
+
+Stage Summary:
+- Browser-verified with styled PDF (blue header bg, white bold header text, red/green/italic data text):
+  - A1-D1 (header): font=FFffffff (white) ✓, fill=FF3366cc (blue) ✓, bold=True ✓
+  - A2 (Apple): font=FF1a1a1a (dark) ✓
+  - A3 (Banana): font=FFcc3333 (red) ✓
+  - A4 (Cherry): font=FF1a1a1a (dark), italic=True ✓ (from Helvetica-Oblique font name)
+  - A5 (Date): font=FF339933 (green) ✓
+- Plain table PDF still works (3828 bytes, 24 cells, correct data extraction).
+- Lint clean, worker syntax valid.
+- Text colors, background colors, bold, and italic are now all applied from the PDF content stream — matching what iLovePDF produces.
