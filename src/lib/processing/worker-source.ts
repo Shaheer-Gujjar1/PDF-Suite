@@ -1138,66 +1138,238 @@ processors['excel-to-pdf'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/** Extract text items (with x/y positions + style hints) per page using pdf.js.
- *  Returns an array of pages; each page is an array of lines; each line is
- *  an array of {x, text, bold, italic, fontSize} items sorted left-to-right.
- *  Bold/italic are detected from the font name (e.g. "Helvetica-Bold").
- *  Text/background colors are NOT available from getTextContent (they require
- *  operator-list parsing, which is unreliable); borders are vector graphics,
- *  also not available from text extraction. */
-async function extractTextPages(data, scale) {
+/** Extract text items (with x/y positions + colors + style hints) and
+ *  background rectangles per page using pdf.js.
+ *
+ *  Uses BOTH getTextContent() (for decoded text strings + positions) AND
+ *  getOperatorList() (for fill colors + background rectangles). The operator
+ *  list is the full page drawing stream — it contains setFillRGBColor ops
+ *  (which set the text color) before each showText op, and rectangle+fill
+ *  ops (which draw cell backgrounds). We walk the operator list to track the
+ *  current fill color at each text-drawing operation, and collect filled
+ *  rectangles as potential cell backgrounds.
+ *
+ *  Returns pages: each page = { lines: [[{x,y,text,bold,italic,fontSize,color}], ...],
+ *  bgRects: [{x,y,w,h,color}] } */
+async function extractTextPages(data, rawBytes, logFn) {
   var pdfjs;
   try { pdfjs = await loadPdfJs(); }
   catch (e) { throw new Error('Could not load PDF text engine: ' + (e.message || e)); }
-  /* Copy the data — pdf.js transfers/detaches the ArrayBuffer internally */
   var dataCopy = data.slice(0);
   var doc = await pdfjs.getDocument({ data: new Uint8Array(dataCopy), useWorkerFetch: false, isEvalSupported: false }).promise;
   var pages = [];
+
+  /* Parse the raw PDF bytes (if provided) to extract color + background rect
+     info from the content streams. This is a lightweight regex-based parser
+     that handles common PDF drawing operators (rg, g, re, f, Tj, TJ). */
+  var rawStreamColors = [];  /* per-page: { textColors: [], bgRects: [] } */
+  if (rawBytes && rawBytes.byteLength > 0) {
+    try {
+      /* Find stream...endstream blocks by scanning the raw bytes directly
+         (avoids string encode/decode corruption of binary zlib data). */
+      var pdfU8 = new Uint8Array(rawBytes);
+      var allStreamBytes = [];  /* array of Uint8Array */
+      var streamKey = [115, 116, 114, 101, 97, 109];  /* "stream" */
+      var endstreamKey = [101, 110, 100, 115, 116, 114, 101, 97, 109];  /* "endstream" */
+      for (var bi = 0; bi < pdfU8.length - 6; bi++) {
+        /* Check for "stream" */
+        var match = true;
+        for (var sk = 0; sk < 6; sk++) { if (pdfU8[bi + sk] !== streamKey[sk]) { match = false; break; } }
+        if (!match) continue;
+        /* Skip \r\n or \n after "stream" */
+        var contentStart = bi + 6;
+        if (pdfU8[contentStart] === 13) contentStart++;  /* \r */
+        if (pdfU8[contentStart] === 10) contentStart++;  /* \n */
+        /* Find "endstream" */
+        var endIdx = -1;
+        for (var ei = contentStart; ei < pdfU8.length - 9; ei++) {
+          var ematch = true;
+          for (var ek = 0; ek < 9; ek++) { if (pdfU8[ei + ek] !== endstreamKey[ek]) { ematch = false; break; } }
+          if (ematch) { endIdx = ei; break; }
+        }
+        if (endIdx > 0) {
+          /* Trim trailing \r\n before endstream */
+          var contentEnd = endIdx;
+          if (pdfU8[contentEnd - 1] === 10) contentEnd--;
+          if (pdfU8[contentEnd - 1] === 13) contentEnd--;
+          allStreamBytes.push(pdfU8.subarray(contentStart, contentEnd));
+        }
+      }
+      /* For each stream, try uncompressed first; if it has text operators
+         (BT/Tj/TJ) and color operators (rg/re/f), parse it. If not, try
+         inflating with pako. */
+      var contentStreams = [];
+      for (var si = 0; si < allStreamBytes.length; si++) {
+        var s = new TextDecoder('latin1').decode(allStreamBytes[si]);
+        if (/\\b(BT|Tj|TJ)\\b/.test(s) && /\\b(rg|re|f)\\b/.test(s)) {
+          contentStreams.push(s);
+        }
+      }
+      /* If no uncompressed content streams, try inflating with the built-in
+         DecompressionStream API (no library needed). */
+      if (contentStreams.length === 0 && typeof DecompressionStream !== 'undefined') {
+        for (var si2 = 0; si2 < allStreamBytes.length; si2++) {
+          try {
+            var compressed = allStreamBytes[si2];
+            var blob = new Blob([compressed]);
+            var ds = blob.stream().pipeThrough(new DecompressionStream('deflate'));
+            var reader = ds.getReader();
+            var chunks = [];
+            var totalLen = 0;
+            while (true) {
+              var rd = await reader.read();
+              if (rd.done) break;
+              chunks.push(rd.value);
+              totalLen += rd.value.length;
+            }
+            var inflated = new Uint8Array(totalLen);
+            var off = 0;
+            for (var ch = 0; ch < chunks.length; ch++) { inflated.set(chunks[ch], off); off += chunks[ch].length; }
+            var infStr = new TextDecoder('latin1').decode(inflated);
+            if (/\\b(BT|Tj|TJ)\\b/.test(infStr) && /\\b(rg|re|f)\\b/.test(infStr)) {
+              contentStreams.push(infStr);
+            }
+          } catch (e) { /* inflate failed — skip this stream */ }
+        }
+      }
+      /* Parse each content stream for colors + rects. */
+      for (var cs = 0; cs < contentStreams.length; cs++) {
+        var stream = contentStreams[cs];
+        var curFill = [0, 0, 0];
+        var pathPoints = [];  /* collect m/l points for path-based rects */
+        var pageTextColors = [];
+        var pageBgRects = [];
+        /* Token regex: matches color ops (rg/g), rect (re), path ops (m/l/h),
+           fill (f/B), text (Tj/TJ). Backslashes doubled for template literal. */
+        var tokenRe = /(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(rg|g)\\b|(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+re\\b|(-?\\d+\\.?\\d*)\\s+(-?\\d+\\.?\\d*)\\s+(m|l)\\b|(re|f|B|h|Tj|TJ)\\b/g;
+        var tm;
+        while ((tm = tokenRe.exec(stream)) !== null) {
+          if (tm[4] === 'rg') {
+            curFill = [parseFloat(tm[1]), parseFloat(tm[2]), parseFloat(tm[3])];
+          } else if (tm[4] === 'g') {
+            curFill = [parseFloat(tm[1]), parseFloat(tm[1]), parseFloat(tm[1])];
+          } else if (tm[8] === 're' && tm[5] !== undefined) {
+            /* re = rectangle shortcut: x y w h re */
+            pathPoints = [{x: parseFloat(tm[5]), y: parseFloat(tm[6])}, {x: parseFloat(tm[5]) + parseFloat(tm[7]), y: parseFloat(tm[6])}, {x: parseFloat(tm[5]) + parseFloat(tm[7]), y: parseFloat(tm[6]) + parseFloat(tm[8])}, {x: parseFloat(tm[5]), y: parseFloat(tm[6]) + parseFloat(tm[8])}];
+          } else if (tm[11] === 'm') {
+            /* moveTo: start new path */
+            pathPoints = [{x: parseFloat(tm[9]), y: parseFloat(tm[10])}];
+          } else if (tm[11] === 'l') {
+            /* lineTo: add point */
+            pathPoints.push({x: parseFloat(tm[9]), y: parseFloat(tm[10])});
+          } else if (tm[12] === 'h') {
+            /* closePath: path is ready to fill */
+            /* keep pathPoints for the next fill op */
+          } else if (tm[12] === 'f' || tm[12] === 'B') {
+            /* fill: if path is a rectangle (4 points forming a rect), record it */
+            if (pathPoints.length >= 4) {
+              var xs = pathPoints.map(function(p) { return p.x; });
+              var ys = pathPoints.map(function(p) { return p.y; });
+              var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
+              var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+              var w = maxX - minX, h = maxY - minY;
+              if (w > 2 && h > 2) {
+                pageBgRects.push({ x: minX, y: minY, w: w, h: h, color: curFill.slice() });
+              }
+            }
+            pathPoints = [];
+          } else if (tm[12] === 'Tj' || tm[12] === 'TJ') {
+            pageTextColors.push(curFill.slice());
+          }
+        }
+        rawStreamColors.push({ textColors: pageTextColors, bgRects: pageBgRects });
+      }
+    } catch (e) {
+      /* Raw stream parsing failed — continue without colors. */
+    }
+  }
+
   for (var p = 1; p <= doc.numPages; p++) {
     var page = await doc.getPage(p);
     var content = await page.getTextContent();
     var styles = content.styles || {};
-    /* pdf.js does NOT expose font weight/italic flags via getTextContent.
-       The content.styles[fontName] object only contains fontFamily (often
-       just "sans-serif"), ascent, descent, vertical — no bold/italic.
-       The real font names (e.g. "Helvetica-Bold") are in the PDF font
-       dictionary but not accessible through the public text-extraction API.
-       We detect bold/italic from whatever name info IS available: the
-       fontName string and the fontFamily string. This works for PDFs that
-       embed descriptive font names, but not for PDFs using standard 14
-       fonts where pdf.js assigns generic IDs like "g_d0_f1". */
-    var fontRealNames = {};
-    /* Group items into lines by rounded y-coordinate, then sort by x. */
+    var contentItems = content.items;
+    var textColors = [];      /* color per content item index */
+    var bgRects = [];         /* filled rectangles (cell backgrounds) */
+
+    /* Use colors from the raw stream parse for this page (1-indexed page p
+       corresponds to contentStreams[p-1]). */
+    var rawPageData = rawStreamColors[p - 1];
+    if (rawPageData) {
+      bgRects = rawPageData.bgRects;
+      for (var rc = 0; rc < rawPageData.textColors.length && rc < contentItems.length; rc++) {
+        textColors[rc] = rawPageData.textColors[rc];
+      }
+    }
+
+    /* Walk the operator list to track fill color at each text op + collect
+       background rectangles. The showText/showSpacedText ops in the operator
+       list are in the same order as content.items, so we can assign colors
+       by index. */
+    /* If raw-stream color matching fell short, fill remaining text colors
+       with black (default). */
+    for (var fi = 0; fi < contentItems.length; fi++) {
+      if (!textColors[fi]) textColors[fi] = [0, 0, 0];
+    }
+
+    /* Build text items with colors, grouped into lines by y. */
     var lines = {};
-    for (var i = 0; i < content.items.length; i++) {
-      var item = content.items[i];
+    for (var i = 0; i < contentItems.length; i++) {
+      var item = contentItems[i];
       var str = item.str || '';
       if (!str) continue;
       var yKey = Math.round(-item.transform[5] / 2) * 2;
       if (!lines[yKey]) lines[yKey] = [];
-      /* Detect bold/italic from font name. Try multiple sources:
-         1. content.styles[fontName].fontFamily
-         2. The real font name from page.commonObjs (e.g. "Helvetica-Bold")
-         3. item.fontName itself */
       var fontName = item.fontName || '';
       var fontStyle = styles[fontName] || {};
-      var realFontName = fontRealNames[fontName] || '';
-      var combined = ((fontStyle.fontFamily || '') + ' ' + fontName + ' ' + realFontName).toLowerCase();
+      var combined = ((fontStyle.fontFamily || '') + ' ' + fontName).toLowerCase();
       var bold = /bold|black|heavy|semibold/.test(combined);
       var italic = /italic|oblique/.test(combined);
       var fontSize = Math.hypot(item.transform[0], item.transform[1]) || Math.hypot(item.transform[2], item.transform[3]) || (item.height || 10);
-      lines[yKey].push({ x: item.transform[4], text: str, bold: bold, italic: italic, fontSize: fontSize });
+      lines[yKey].push({
+        x: item.transform[4],
+        y: item.transform[5],
+        text: str,
+        bold: bold,
+        italic: italic,
+        fontSize: fontSize,
+        color: textColors[i] || [0, 0, 0]
+      });
     }
     var sortedYs = Object.keys(lines).map(Number).sort(function (a, b) { return a - b; });
     var pageLines = sortedYs.map(function (yk) {
-      var arr = lines[yk].sort(function (a, b) { return a.x - b.x; });
-      return arr;
+      return lines[yk].sort(function (a, b) { return a.x - b.x; });
     }).filter(function (l) { return l.length > 0; });
-    pages.push(pageLines);
+    pages.push({ lines: pageLines, bgRects: bgRects });
     try { await page.cleanup(); } catch (_) {}
   }
   try { await doc.destroy(); } catch (_) {}
   return pages;
+}
+
+/** Convert a 0-1 RGB float array to an ARGB hex string (e.g. "FFFF0000" for red). */
+function rgbToArgb(rgb) {
+  function h(v) { var s = Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16); return s.length < 2 ? '0' + s : s; }
+  return 'FF' + h(rgb[0]) + h(rgb[1]) + h(rgb[2]);
+}
+
+/** Find the background color for a text item by checking which background rect
+ *  contains the item's position. Returns null if no rect contains it (white bg).
+ *  Prefers the smallest containing rect (innermost cell background). */
+function findBgColor(item, bgRects) {
+  var best = null;
+  var bestArea = Infinity;
+  var ix = item.x;
+  var iy = item.y;  /* baseline y (PDF bottom-left origin) */
+  for (var i = 0; i < bgRects.length; i++) {
+    var r = bgRects[i];
+    /* Text baseline should be within the rect's y-range, and x within x-range. */
+    if (ix >= r.x - 1 && ix <= r.x + r.w + 1 && iy >= r.y - 2 && iy <= r.y + r.h + 2) {
+      var area = r.w * r.h;
+      if (area < bestArea) { bestArea = area; best = r.color; }
+    }
+  }
+  return best;
 }
 
 /** Detect column boundaries from the x-coordinates of all text items across
@@ -1228,10 +1400,11 @@ function detectColumns(pageLines) {
 }
 
 /** Build a 2D array of cells (rows × columns) from a page's lines + detected
- *  columns. Each cell is { text, bold, italic, fontSize } — the style flags
- *  are OR'd across all items that land in that cell (so a cell is bold if any
- *  of its items are bold). Drops fully-empty trailing columns. */
-function buildStyledGrid(pageLines, cols) {
+ *  columns. Each cell is { text, bold, italic, fontSize, color, bgColor } —
+ *  style flags are OR'd across items in the cell; color = first item's text
+ *  color; bgColor = matched background rect color (or null for white).
+ *  Drops fully-empty trailing columns. */
+function buildStyledGrid(pageLines, cols, bgRects) {
   if (cols.length === 0) {
     /* No columns detected — each line becomes a single cell. */
     return pageLines.map(function (line) {
@@ -1240,7 +1413,9 @@ function buildStyledGrid(pageLines, cols) {
       var anyItalic = line.some(function (it) { return it.italic; });
       var maxFs = 0;
       for (var k = 0; k < line.length; k++) { if (line[k].fontSize > maxFs) maxFs = line[k].fontSize; }
-      return [{ text: texts.join(' ').trim(), bold: anyBold, italic: anyItalic, fontSize: maxFs }];
+      var firstItem = line[0];
+      var bg = firstItem ? findBgColor(firstItem, bgRects) : null;
+      return [{ text: texts.join(' ').trim(), bold: anyBold, italic: anyItalic, fontSize: maxFs, color: firstItem ? firstItem.color : [0,0,0], bgColor: bg }];
     });
   }
   var grid = [];
@@ -1248,7 +1423,7 @@ function buildStyledGrid(pageLines, cols) {
     var line = pageLines[li];
     var row = [];
     for (var c = 0; c < cols.length; c++) {
-      row.push({ text: '', bold: false, italic: false, fontSize: 0, _count: 0 });
+      row.push({ text: '', bold: false, italic: false, fontSize: 0, color: [0,0,0], bgColor: null, _count: 0 });
     }
     for (var ii = 0; ii < line.length; ii++) {
       var item = line[ii];
@@ -1262,6 +1437,8 @@ function buildStyledGrid(pageLines, cols) {
         cell.text += ' ' + item.text;
       } else {
         cell.text = item.text;
+        cell.color = item.color;
+        cell.bgColor = findBgColor(item, bgRects);
       }
       if (item.bold) cell.bold = true;
       if (item.italic) cell.italic = true;
@@ -1286,7 +1463,7 @@ function buildStyledGrid(pageLines, cols) {
     }
     if (keepCols.length < cols.length) {
       grid = grid.map(function (row2) {
-        return keepCols.map(function (ci) { return row2[ci] || { text: '', bold: false, italic: false, fontSize: 0 }; });
+        return keepCols.map(function (ci) { return row2[ci] || { text: '', bold: false, italic: false, fontSize: 0, color: [0,0,0], bgColor: null }; });
       });
     }
   }
@@ -1301,28 +1478,48 @@ processors['pdf-to-excel'] = async function (inputs, opts, onProgress, log) {
   var JSZip = await getJSZip();
   var out = [];
 
-  for (var i = 0; i < inputs.length; i++) {
-    log('Extracting from ' + inputs[i].fileName);
-    var pages = await extractTextPages(inputs[i].data);
+  /* Separate the actual PDF inputs from the raw-bytes inputs (prefixed with
+     __raw__). The raw copies are used for content-stream color parsing. */
+  var pdfInputs = [];
+  var rawInputs = {};
+  for (var ii = 0; ii < inputs.length; ii++) {
+    if (inputs[ii].fileName.indexOf('__raw__') === 0) {
+      rawInputs[inputs[ii].fileName.slice(7)] = inputs[ii].data;
+    } else {
+      pdfInputs.push(inputs[ii]);
+    }
+  }
 
-    /* Build a styled grid for each page. */
+  for (var i = 0; i < pdfInputs.length; i++) {
+    log('Extracting from ' + pdfInputs[i].fileName);
+    var rawBytes = rawInputs[pdfInputs[i].fileName] || null;
+    var pages = await extractTextPages(pdfInputs[i].data, rawBytes, log);
+
+    /* Build a styled grid for each page. Each page now = { lines, bgRects }. */
     var sheetsData = [];
     var totalCells = 0;
     for (var p = 0; p < pages.length; p++) {
-      var pageLines = pages[p] || [];
+      var pageData = pages[p] || { lines: [], bgRects: [] };
+      var pageLines = pageData.lines || [];
+      var bgRects = pageData.bgRects || [];
       var cols = detectColumns(pageLines);
-      var grid = buildStyledGrid(pageLines, cols);
-      if (grid.length === 0) grid = [[{ text: '(no text extracted on this page)', bold: false, italic: false, fontSize: 10 }]];
+      var grid = buildStyledGrid(pageLines, cols, bgRects);
+      if (grid.length === 0) grid = [[{ text: '(no text extracted on this page)', bold: false, italic: false, fontSize: 10, color: [0,0,0], bgColor: null }]];
       totalCells += grid.length * (grid[0] ? grid[0].length : 1);
       sheetsData.push({ name: ('Page ' + (p + 1)).slice(0, 31), grid: grid });
     }
 
-    /* Collect unique cell styles (font combinations) across all sheets. */
-    /* Style key = "bold|italic" — we only have bold/italic from pdf.js. */
+    /* Collect unique cell styles. Style key now includes bold/italic +
+       text color + background color so each unique combination gets its
+       own font + fill + xf entry in styles.xml. */
     var styleMap = {};   /* key -> xfId (cellXfs index) */
-    var styleKeys = [];  /* ordered list of keys */
+    var styleKeys = [];  /* ordered list of {bold, italic, color, bgColor} */
     function getStyleKey(cell) {
-      var k = (cell.bold ? 'b' : '') + '|' + (cell.italic ? 'i' : '');
+      var c = cell.color || [0, 0, 0];
+      var bg = cell.bgColor;
+      var k = (cell.bold ? 'b' : '') + '|' + (cell.italic ? 'i' : '')
+        + '|' + rgbToArgb(c)
+        + '|' + (bg ? rgbToArgb(bg) : 'none');
       return k;
     }
     for (var si = 0; si < sheetsData.length; si++) {
@@ -1332,7 +1529,7 @@ processors['pdf-to-excel'] = async function (inputs, opts, onProgress, log) {
           var key = getStyleKey(g[r][c]);
           if (!(key in styleMap)) {
             styleMap[key] = styleKeys.length;
-            styleKeys.push(key);
+            styleKeys.push({ bold: g[r][c].bold, italic: g[r][c].italic, color: g[r][c].color || [0,0,0], bgColor: g[r][c].bgColor });
           }
         }
       }
@@ -1388,23 +1585,46 @@ processors['pdf-to-excel'] = async function (inputs, opts, onProgress, log) {
     zip.file('xl/sharedStrings.xml', sstXml);
 
     /* ---- xl/styles.xml ---- */
-    /* Build fonts: one per style key (bold/italic combos). */
+    /* Build fonts: one per style key, each with its text color. */
     var fontsXml = '<fonts count="' + styleKeys.length + '">';
     for (var fki = 0; fki < styleKeys.length; fki++) {
-      var parts = styleKeys[fki].split('|');
-      var isBold = parts[0] === 'b';
-      var isItalic = parts[1] === 'i';
-      fontsXml += '<font><sz val="11"/><color rgb="FF000000"/>' + (isBold ? '<b/>' : '') + (isItalic ? '<i/>' : '') + '<name val="Calibri"/></font>';
+      var sk = styleKeys[fki];
+      var fontColor = rgbToArgb(sk.color);
+      fontsXml += '<font><sz val="11"/><color rgb="' + fontColor + '"/>' + (sk.bold ? '<b/>' : '') + (sk.italic ? '<i/>' : '') + '<name val="Calibri"/></font>';
     }
     fontsXml += '</fonts>';
-    /* fills: index 0 = none, index 1 = gray125 (required by spec). */
+    /* Build fills: index 0 = none, index 1 = gray125 (required by spec),
+       then one solid fill per unique background color. */
+    var fillMap = {};  /* argb -> fillId */
+    var fillList = []; /* [{argb}] */
     var fillsXml = '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>';
+    for (var fsi = 0; fsi < styleKeys.length; fsi++) {
+      var bg = styleKeys[fsi].bgColor;
+      if (bg) {
+        var bgArgb = rgbToArgb(bg);
+        if (!(bgArgb in fillMap)) {
+          fillMap[bgArgb] = fillList.length + 2;  /* +2 for none + gray125 */
+          fillList.push(bgArgb);
+        }
+      }
+    }
+    if (fillList.length > 0) {
+      fillsXml = '<fills count="' + (fillList.length + 2) + '"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>';
+      for (var fli = 0; fli < fillList.length; fli++) {
+        fillsXml += '<fill><patternFill patternType="solid"><fgColor rgb="' + fillList[fli] + '"/><bgColor indexed="64"/></patternFill></fill>';
+      }
+      fillsXml += '</fills>';
+    }
     /* borders: one empty border. */
     var bordersXml = '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>';
-    /* cellXfs: one per style key, referencing fonts by index. */
+    /* cellXfs: one per style key, referencing font + fill by index. */
     var cellXfsXml = '<cellXfs count="' + styleKeys.length + '">';
     for (var xi = 0; xi < styleKeys.length; xi++) {
-      cellXfsXml += '<xf numFmtId="0" fontId="' + xi + '" fillId="0" borderId="0" xfId="0"' + (styleKeys[xi] !== '|' ? ' applyFont="1"' : '') + '><alignment vertical="top" wrapText="1"/></xf>';
+      var xsk = styleKeys[xi];
+      var fillId = xsk.bgColor ? fillMap[rgbToArgb(xsk.bgColor)] : 0;
+      var applyAttrs = ' applyFont="1"';
+      if (xsk.bgColor) applyAttrs += ' applyFill="1"';
+      cellXfsXml += '<xf numFmtId="0" fontId="' + xi + '" fillId="' + fillId + '" borderId="0" xfId="0"' + applyAttrs + '><alignment vertical="top" wrapText="1"/></xf>';
     }
     cellXfsXml += '</cellXfs>';
     var stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' + fontsXml + fillsXml + bordersXml + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellStyleXfs>' + cellXfsXml + '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';

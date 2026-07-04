@@ -403,10 +403,20 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       for (const qf of orderedFiles) {
         const data = await qf.file.arrayBuffer()
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        /* For PDF to Excel: send a second copy of the raw PDF bytes with a
+           special filename so the worker can parse the raw content stream
+           for colors + background rects (pdf.js detaches the first copy). */
+        if (isPdfToExcel) {
+          const rawCopy = await qf.file.arrayBuffer()
+          inputs.push({ fileName: '__raw__' + qf.file.name, data: rawCopy, size: rawCopy.byteLength })
+        }
       }
       if (isMerge) {
         mode = 'single'
         singleLabel = 'Merged document'
+      } else if (isPdfToExcel) {
+        mode = 'single'
+        singleLabel = 'PDF → Excel output'
       } else if (isSplit) {
         // Split uses the SplitView config instead of the generic options
         runOptions = { ...options, mode: splitConfig.mode, ranges: splitConfig.ranges }

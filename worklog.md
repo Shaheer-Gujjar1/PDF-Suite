@@ -403,3 +403,31 @@ Stage Summary:
   - Colors/borders: NOT available from pdf.js text extraction (fundamental limitation) ✗
   - Lint clean, worker syntax valid.
 - The conversion now produces properly-sized, styled XLSX files with the correct filename pattern. Bold/italic detection works for most real-world PDFs (Office-generated, Google Docs, etc.) but not for PDFs using only the PDF standard 14 fonts.
+
+---
+Task ID: pdf-to-excel-colors
+Agent: main (orchestrator)
+Task: Apply background colors, text colors, borders, bold/italic to PDF to Excel output — like iLovePDF.
+
+Work Log:
+- **Root cause of "no colors":** pdf.js's getTextContent() does NOT expose text color or background rectangles. The content.styles object only has {fontFamily, ascent, descent, vertical} — no color/weight info. This is a fundamental pdf.js API limitation.
+- **Solution: parse the raw PDF content streams directly.** The main thread sends a second copy of the PDF bytes (prefixed `__raw__`) to the worker. The worker scans the raw bytes for `stream...endstream` blocks, inflates FlateDecode-compressed streams using the built-in `DecompressionStream` API (no library needed — pako couldn't be loaded in the blob-URL worker), then regex-parses the decompressed content stream for PDF drawing operators:
+  - `rg`/`g` = set fill color (text color)
+  - `re` = rectangle (background) + `m`/`l`/`h`/`f` = path-based rectangle (pdf-lib uses path ops, not `re`)
+  - `Tj`/`TJ` = text drawing (assigns current fill color to that text item)
+- **Text colors: WORKING.** Verified: white text on header (FFffffff), red text (FFcc3333), green text (FF339933), black text (FF000000) — all correctly extracted from the `rg` operators before each `Tj`.
+- **Background fills: PARTIALLY WORKING.** The bgRects are detected (1 rect found for the blue header background) but not matched to cells because the rect coordinates are in a transformed coordinate space (after `cm` concat matrix operators) while the text positions from pdf.js are in page space. Matching requires tracking the `cm` transforms — not yet implemented.
+- **Bold detection: NOT WORKING for standard fonts.** The raw stream has font names like `/Helvetica-Bold-7098480789` (contains "Bold") but the current code only checks pdf.js's `content.styles[fontName].fontFamily` which returns "sans-serif". Would need to parse the raw stream's `Tf` operators to extract the font name string.
+- **Borders: NOT available** — borders are vector stroke operations (`S` operator) which would need separate tracking.
+- Key technical challenges solved:
+  - pako won't load in blob-URL workers (importScripts/fetch/eval all fail) → used built-in `DecompressionStream('deflate')` instead
+  - Template literal escaping: all regex backslashes must be doubled (`\\d`, `\\s`, `\\b`, `\\r`, `\\n`)
+  - Binary zlib data corruption: string round-trip corrupts bytes → scan raw Uint8Array directly for `stream`/`endstream` byte patterns
+  - pdf.js detaches the input ArrayBuffer → send a second copy from the main thread
+
+Stage Summary:
+- Text colors ARE now applied to the XLSX (verified via openpyxl: white/red/green/black font colors correctly assigned per cell).
+- Background fills are detected but not yet matched to cells (coordinate transform gap).
+- Bold/italic from raw stream font names not yet wired up.
+- The conversion works without hanging, produces valid XLSX with correct data + text colors + auto-sized columns/rows + correct filename pattern.
+- Lint clean, worker syntax valid.
