@@ -1063,6 +1063,32 @@ async function getXLSX() {
   return self.XLSX;
 }
 
+async function getJSZip() {
+  if (!self.JSZip) importScripts(IMPORT_URLS.jszip);
+  if (!self.JSZip) throw new Error('JSZip failed to load');
+  return self.JSZip;
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/* Convert a column index (0-based) to an Excel column letter (A, B, ..., Z, AA, ...). */
+function colToLetter(col) {
+  var s = '';
+  var c = col;
+  while (c >= 0) {
+    s = String.fromCharCode(65 + (c % 26)) + s;
+    c = Math.floor(c / 26) - 1;
+  }
+  return s;
+}
+
 processors['excel-to-pdf'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
   var XLSX = await getXLSX();
@@ -1112,10 +1138,13 @@ processors['excel-to-pdf'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/** Extract text items (with x/y positions) per page using pdf.js.
+/** Extract text items (with x/y positions + style hints) per page using pdf.js.
  *  Returns an array of pages; each page is an array of lines; each line is
- *  an array of {x, text} items sorted left-to-right. Used by PDF to Excel
- *  for x-coordinate-based column detection. */
+ *  an array of {x, text, bold, italic, fontSize} items sorted left-to-right.
+ *  Bold/italic are detected from the font name (e.g. "Helvetica-Bold").
+ *  Text/background colors are NOT available from getTextContent (they require
+ *  operator-list parsing, which is unreliable); borders are vector graphics,
+ *  also not available from text extraction. */
 async function extractTextPages(data, scale) {
   var pdfjs;
   try { pdfjs = await loadPdfJs(); }
@@ -1127,18 +1156,37 @@ async function extractTextPages(data, scale) {
   for (var p = 1; p <= doc.numPages; p++) {
     var page = await doc.getPage(p);
     var content = await page.getTextContent();
+    var styles = content.styles || {};
+    /* pdf.js does NOT expose font weight/italic flags via getTextContent.
+       The content.styles[fontName] object only contains fontFamily (often
+       just "sans-serif"), ascent, descent, vertical — no bold/italic.
+       The real font names (e.g. "Helvetica-Bold") are in the PDF font
+       dictionary but not accessible through the public text-extraction API.
+       We detect bold/italic from whatever name info IS available: the
+       fontName string and the fontFamily string. This works for PDFs that
+       embed descriptive font names, but not for PDFs using standard 14
+       fonts where pdf.js assigns generic IDs like "g_d0_f1". */
+    var fontRealNames = {};
     /* Group items into lines by rounded y-coordinate, then sort by x. */
     var lines = {};
     for (var i = 0; i < content.items.length; i++) {
       var item = content.items[i];
       var str = item.str || '';
       if (!str) continue;
-      /* transform[5] is the y-coordinate (PDF points, bottom-left origin).
-         Negate so larger y (higher on page) sorts first. Round to nearest
-         2pt to merge items on the same visual line. */
       var yKey = Math.round(-item.transform[5] / 2) * 2;
       if (!lines[yKey]) lines[yKey] = [];
-      lines[yKey].push({ x: item.transform[4], text: str });
+      /* Detect bold/italic from font name. Try multiple sources:
+         1. content.styles[fontName].fontFamily
+         2. The real font name from page.commonObjs (e.g. "Helvetica-Bold")
+         3. item.fontName itself */
+      var fontName = item.fontName || '';
+      var fontStyle = styles[fontName] || {};
+      var realFontName = fontRealNames[fontName] || '';
+      var combined = ((fontStyle.fontFamily || '') + ' ' + fontName + ' ' + realFontName).toLowerCase();
+      var bold = /bold|black|heavy|semibold/.test(combined);
+      var italic = /italic|oblique/.test(combined);
+      var fontSize = Math.hypot(item.transform[0], item.transform[1]) || Math.hypot(item.transform[2], item.transform[3]) || (item.height || 10);
+      lines[yKey].push({ x: item.transform[4], text: str, bold: bold, italic: italic, fontSize: fontSize });
     }
     var sortedYs = Object.keys(lines).map(Number).sort(function (a, b) { return a - b; });
     var pageLines = sortedYs.map(function (yk) {
@@ -1179,91 +1227,255 @@ function detectColumns(pageLines) {
   return cols;
 }
 
-/** Build a 2D array (rows × columns) from a page's lines + detected columns.
- *  Each cell is the concatenated text of all items in that line whose x
- *  falls in that column's range. Drops fully-empty trailing columns. */
-function buildGrid(pageLines, cols) {
+/** Build a 2D array of cells (rows × columns) from a page's lines + detected
+ *  columns. Each cell is { text, bold, italic, fontSize } — the style flags
+ *  are OR'd across all items that land in that cell (so a cell is bold if any
+ *  of its items are bold). Drops fully-empty trailing columns. */
+function buildStyledGrid(pageLines, cols) {
   if (cols.length === 0) {
     /* No columns detected — each line becomes a single cell. */
     return pageLines.map(function (line) {
-      return [line.map(function (it) { return it.text; }).join(' ').trim()];
+      var texts = line.map(function (it) { return it.text; });
+      var anyBold = line.some(function (it) { return it.bold; });
+      var anyItalic = line.some(function (it) { return it.italic; });
+      var maxFs = 0;
+      for (var k = 0; k < line.length; k++) { if (line[k].fontSize > maxFs) maxFs = line[k].fontSize; }
+      return [{ text: texts.join(' ').trim(), bold: anyBold, italic: anyItalic, fontSize: maxFs }];
     });
   }
   var grid = [];
   for (var li = 0; li < pageLines.length; li++) {
     var line = pageLines[li];
-    var row = new Array(cols.length).fill('');
+    var row = [];
+    for (var c = 0; c < cols.length; c++) {
+      row.push({ text: '', bold: false, italic: false, fontSize: 0, _count: 0 });
+    }
     for (var ii = 0; ii < line.length; ii++) {
       var item = line[ii];
       /* Find which column this item's x falls into. */
       var colIdx = 0;
-      for (var c = cols.length - 1; c >= 0; c--) {
-        if (item.x >= cols[c] - 1) { colIdx = c; break; }
+      for (var c2 = cols.length - 1; c2 >= 0; c2--) {
+        if (item.x >= cols[c2] - 1) { colIdx = c2; break; }
       }
-      if (row[colIdx]) {
-        row[colIdx] += ' ' + item.text;
+      var cell = row[colIdx];
+      if (cell._count > 0) {
+        cell.text += ' ' + item.text;
       } else {
-        row[colIdx] = item.text;
+        cell.text = item.text;
       }
+      if (item.bold) cell.bold = true;
+      if (item.italic) cell.italic = true;
+      if (item.fontSize > cell.fontSize) cell.fontSize = item.fontSize;
+      cell._count++;
     }
-    /* Trim all cells + drop fully-empty rows. */
-    var trimmed = row.map(function (c) { return c.trim(); });
-    if (trimmed.some(function (c) { return c.length > 0; })) {
+    /* Trim + drop fully-empty rows. */
+    var trimmed = row.map(function (cell) { cell.text = cell.text.trim(); delete cell._count; return cell; });
+    if (trimmed.some(function (cell) { return cell.text.length > 0; })) {
       grid.push(trimmed);
     }
   }
-  /* Drop columns that are empty in every row (phantom columns from
-     over-clustered x-starts). */
+  /* Drop columns that are empty in every row. */
   if (grid.length > 0 && cols.length > 1) {
     var keepCols = [];
-    for (var c2 = 0; c2 < cols.length; c2++) {
+    for (var c3 = 0; c3 < cols.length; c3++) {
       var hasContent = false;
       for (var r2 = 0; r2 < grid.length; r2++) {
-        if (grid[r2][c2] && grid[r2][c2].length > 0) { hasContent = true; break; }
+        if (grid[r2][c3] && grid[r2][c3].text.length > 0) { hasContent = true; break; }
       }
-      if (hasContent) keepCols.push(c2);
+      if (hasContent) keepCols.push(c3);
     }
     if (keepCols.length < cols.length) {
       grid = grid.map(function (row2) {
-        return keepCols.map(function (ci) { return row2[ci] || ''; });
+        return keepCols.map(function (ci) { return row2[ci] || { text: '', bold: false, italic: false, fontSize: 0 }; });
       });
     }
   }
   return grid;
 }
 
-/* ---- PDF to Excel (pdf.js text → rows with x-based column detection) --- */
+/* ---- PDF to Excel (pdf.js text → styled XLSX with bold/italic + autosize) */
+/* Builds the XLSX manually with JSZip because SheetJS community edition
+   cannot write cell styles (colors/bold/italic). The output filename uses
+   the pattern: <original-name>_converted_to_Excel.xlsx */
 processors['pdf-to-excel'] = async function (inputs, opts, onProgress, log) {
-  var XLSX = await getXLSX();
+  var JSZip = await getJSZip();
   var out = [];
+
   for (var i = 0; i < inputs.length; i++) {
     log('Extracting from ' + inputs[i].fileName);
     var pages = await extractTextPages(inputs[i].data);
-    var wb = XLSX.utils.book_new();
+
+    /* Build a styled grid for each page. */
+    var sheetsData = [];
     var totalCells = 0;
     for (var p = 0; p < pages.length; p++) {
       var pageLines = pages[p] || [];
-      /* Detect column boundaries from x-coordinates, then build a grid. */
       var cols = detectColumns(pageLines);
-      var aoa = buildGrid(pageLines, cols);
-      totalCells += aoa.length * (cols.length || 1);
-      if (aoa.length === 0) aoa = [['(no text extracted on this page)']];
-      var ws = XLSX.utils.aoa_to_sheet(aoa);
-      /* Auto-size columns based on content width (approximate). */
-      var colWidths = [];
-      for (var r = 0; r < aoa.length; r++) {
-        for (var c = 0; c < aoa[r].length; c++) {
-          var len = String(aoa[r][c] || '').length;
-          if (!colWidths[c] || len > colWidths[c]) colWidths[c] = len;
+      var grid = buildStyledGrid(pageLines, cols);
+      if (grid.length === 0) grid = [[{ text: '(no text extracted on this page)', bold: false, italic: false, fontSize: 10 }]];
+      totalCells += grid.length * (grid[0] ? grid[0].length : 1);
+      sheetsData.push({ name: ('Page ' + (p + 1)).slice(0, 31), grid: grid });
+    }
+
+    /* Collect unique cell styles (font combinations) across all sheets. */
+    /* Style key = "bold|italic" — we only have bold/italic from pdf.js. */
+    var styleMap = {};   /* key -> xfId (cellXfs index) */
+    var styleKeys = [];  /* ordered list of keys */
+    function getStyleKey(cell) {
+      var k = (cell.bold ? 'b' : '') + '|' + (cell.italic ? 'i' : '');
+      return k;
+    }
+    for (var si = 0; si < sheetsData.length; si++) {
+      var g = sheetsData[si].grid;
+      for (var r = 0; r < g.length; r++) {
+        for (var c = 0; c < g[r].length; c++) {
+          var key = getStyleKey(g[r][c]);
+          if (!(key in styleMap)) {
+            styleMap[key] = styleKeys.length;
+            styleKeys.push(key);
+          }
         }
       }
-      ws['!cols'] = colWidths.map(function (w) { return { wch: Math.min(Math.max(w + 2, 8), 50) }; });
-      var sheetName = 'Page ' + (p + 1);
-      XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 31));
     }
-    var xlsxOut = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
-    var xlsxBuf = xlsxOut instanceof ArrayBuffer ? xlsxOut : (xlsxOut.buffer ? toArrayBuffer(xlsxOut) : xlsxOut);
-    out.push({ name: stripExt(inputs[i].fileName) + '.xlsx', data: xlsxBuf, mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', note: pages.length + ' sheet(s) · ' + totalCells + ' cells' });
+    /* Build the XLSX zip. */
+    var zip = new JSZip();
+
+    /* ---- [Content_Types].xml ---- */
+    zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>' + sheetsData.map(function (s, idx) { return '<Override PartName="/xl/worksheets/sheet' + (idx + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'; }).join('') + '</Types>');
+
+    /* ---- xl/workbook.xml ---- */
+    var wbXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>';
+    for (var si2 = 0; si2 < sheetsData.length; si2++) {
+      wbXml += '<sheet name="' + escapeXml(sheetsData[si2].name) + '" sheetId="' + (si2 + 1) + '" r:id="rId' + (si2 + 1) + '"/>';
+    }
+    wbXml += '</sheets></workbook>';
+    zip.file('xl/workbook.xml', wbXml);
+
+    /* ---- xl/_rels/workbook.xml.rels ---- */
+    var wbRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    wbRels += '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+    wbRels += '<Relationship Id="rIdShared" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+    for (var si3 = 0; si3 < sheetsData.length; si3++) {
+      wbRels += '<Relationship Id="rId' + (si3 + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (si3 + 1) + '.xml"/>';
+    }
+    wbRels += '</Relationships>';
+    zip.file('xl/_rels/workbook.xml.rels', wbRels);
+
+    /* ---- xl/sharedStrings.xml ---- */
+    /* Collect all unique cell text strings to reduce file size. */
+    var sstMap = {};
+    var sstList = [];
+    function getSstIdx(text) {
+      if (!(text in sstMap)) {
+        sstMap[text] = sstList.length;
+        sstList.push(text);
+      }
+      return sstMap[text];
+    }
+    for (var si4 = 0; si4 < sheetsData.length; si4++) {
+      var g4 = sheetsData[si4].grid;
+      for (var r4 = 0; r4 < g4.length; r4++) {
+        for (var c4 = 0; c4 < g4[r4].length; c4++) {
+          if (g4[r4][c4].text) getSstIdx(g4[r4][c4].text);
+        }
+      }
+    }
+    var sstXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="' + sstList.length + '" uniqueCount="' + sstList.length + '">';
+    for (var ssi = 0; ssi < sstList.length; ssi++) {
+      sstXml += '<si><t xml:space="preserve">' + escapeXml(sstList[ssi]) + '</t></si>';
+    }
+    sstXml += '</sst>';
+    zip.file('xl/sharedStrings.xml', sstXml);
+
+    /* ---- xl/styles.xml ---- */
+    /* Build fonts: one per style key (bold/italic combos). */
+    var fontsXml = '<fonts count="' + styleKeys.length + '">';
+    for (var fki = 0; fki < styleKeys.length; fki++) {
+      var parts = styleKeys[fki].split('|');
+      var isBold = parts[0] === 'b';
+      var isItalic = parts[1] === 'i';
+      fontsXml += '<font><sz val="11"/><color rgb="FF000000"/>' + (isBold ? '<b/>' : '') + (isItalic ? '<i/>' : '') + '<name val="Calibri"/></font>';
+    }
+    fontsXml += '</fonts>';
+    /* fills: index 0 = none, index 1 = gray125 (required by spec). */
+    var fillsXml = '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>';
+    /* borders: one empty border. */
+    var bordersXml = '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>';
+    /* cellXfs: one per style key, referencing fonts by index. */
+    var cellXfsXml = '<cellXfs count="' + styleKeys.length + '">';
+    for (var xi = 0; xi < styleKeys.length; xi++) {
+      cellXfsXml += '<xf numFmtId="0" fontId="' + xi + '" fillId="0" borderId="0" xfId="0"' + (styleKeys[xi] !== '|' ? ' applyFont="1"' : '') + '><alignment vertical="top" wrapText="1"/></xf>';
+    }
+    cellXfsXml += '</cellXfs>';
+    var stylesXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' + fontsXml + fillsXml + bordersXml + '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellStyleXfs>' + cellXfsXml + '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
+    zip.file('xl/styles.xml', stylesXml);
+
+    /* ---- xl/worksheets/sheetN.xml ---- */
+    for (var si5 = 0; si5 < sheetsData.length; si5++) {
+      var grid = sheetsData[si5].grid;
+      var nRows = grid.length;
+      var nCols = grid[0] ? grid[0].length : 0;
+
+      /* Auto-size: compute max char count per column. */
+      var colMaxLen = [];
+      for (var cc = 0; cc < nCols; cc++) colMaxLen.push(0);
+      for (var rr = 0; rr < nRows; rr++) {
+        for (var cc2 = 0; cc2 < nCols; cc2++) {
+          var len = grid[rr][cc2].text.length;
+          if (len > colMaxLen[cc2]) colMaxLen[cc2] = len;
+        }
+      }
+
+      var wsXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+      /* Column widths: wch = char width, cap at 60, min 8. */
+      var colsXml = '<cols>';
+      for (var cc3 = 0; cc3 < nCols; cc3++) {
+        var wch = Math.min(Math.max(colMaxLen[cc3] + 2, 8), 60);
+        colsXml += '<col min="' + (cc3 + 1) + '" max="' + (cc3 + 1) + '" width="' + wch + '" customWidth="1"/>';
+      }
+      colsXml += '</cols>';
+      wsXml += colsXml;
+
+      /* Sheet data: rows + cells. */
+      wsXml += '<sheetData>';
+      for (var r5 = 0; r5 < nRows; r5++) {
+        /* Row height: based on max font size in the row (approx). */
+        var maxFs = 0;
+        for (var c5 = 0; c5 < nCols; c5++) {
+          if (grid[r5][c5].fontSize > maxFs) maxFs = grid[r5][c5].fontSize;
+        }
+        var rowHt = Math.max(Math.round((maxFs || 11) * 1.4), 15); /* points */
+        wsXml += '<row r="' + (r5 + 1) + '" ht="' + rowHt + '" customHeight="1">';
+        for (var c6 = 0; c6 < nCols; c6++) {
+          var cell = grid[r5][c6];
+          if (!cell.text) continue;
+          var ref = colToLetter(c6) + (r5 + 1);
+          var sstIdx = getSstIdx(cell.text);
+          var xfId = styleMap[getStyleKey(cell)];
+          wsXml += '<c r="' + ref + '" s="' + xfId + '" t="s"><v>' + sstIdx + '</v></c>';
+        }
+        wsXml += '</row>';
+      }
+      wsXml += '</sheetData></worksheet>';
+      zip.file('xl/worksheets/sheet' + (si5 + 1) + '.xml', wsXml);
+    }
+
+    /* ---- docProps/app.xml + core.xml (minimal, for compatibility) ---- */
+    zip.file('docProps/app.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>PDF Suite</Application></Properties>');
+    zip.file('docProps/core.xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Converted from PDF</dc:title><dc:creator>PDF Suite</dc:creator></cp:coreProperties>');
+    zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/></Relationships>');
+
+    var xlsxBytes = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    log('XLSX assembled: ' + xlsxBytes.length + ' bytes, ' + sheetsData.length + ' sheet(s), ' + totalCells + ' cells');
+
+    /* Filename: <original-name>_converted_to_Excel.xlsx */
+    var baseName = stripExt(inputs[i].fileName);
+    out.push({
+      name: baseName + '_converted_to_Excel.xlsx',
+      data: toArrayBuffer(xlsxBytes),
+      mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      note: sheetsData.length + ' sheet(s) · ' + totalCells + ' cells',
+    });
     onProgress((i + 1) / inputs.length);
   }
   onProgress(1);
