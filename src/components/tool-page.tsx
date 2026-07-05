@@ -31,6 +31,7 @@ import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-t
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
 import { PdfToExcelView } from '@/components/tools/pdf-to-excel-view'
+import { PageNumbersPreview } from '@/components/tools/page-numbers-preview'
 import { renderDocxToPages } from '@/lib/docx-renderer'
 import { renderXlsxToPages } from '@/lib/xlsx-renderer'
 import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
@@ -105,6 +106,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isExcelToPdf = tool.id === 'excel-to-pdf'
   const isHtmlToPdf = tool.id === 'html-to-pdf'
   const isPdfToExcel = tool.id === 'pdf-to-excel'
+  const isPageNumbers = tool.id === 'page-numbers'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -679,6 +681,35 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
               onChange={setOptions}
               disabled={processing.isWorking}
             />
+          </div>
+        )}
+
+        {/* Page Numbers: real-time first-page preview with the number overlay.
+            Larger size so the user can clearly see how the number looks. */}
+        {isPageNumbers && files.length > 0 && (
+          <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_400px]">
+            <div className="order-2 lg:order-1">
+              <PageNumbersPreview
+                file={files[0].file}
+                config={{
+                  position: (options.position as string) || 'bottom-center',
+                  fontSize: Number(options.fontSize ?? 11),
+                  format: (options.format as string) || '{n}',
+                  startNumber: Number(options.startNumber ?? 1),
+                }}
+              />
+            </div>
+            <div className="order-1 lg:order-2">
+              <div className="rounded-xl border border-border/60 bg-secondary/40 p-4 text-sm">
+                <p className="mb-2 font-medium">Live preview</p>
+                <p className="text-xs text-muted-foreground">
+                  This preview shows exactly how the page number will appear on page 1 of your PDF. Adjust the settings above and the preview updates instantly.
+                </p>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  The preview uses the same positioning logic as the actual conversion, so what you see is what you get.
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
