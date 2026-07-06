@@ -2,38 +2,8 @@
 
 import * as React from 'react'
 import { Loader2, FileText } from 'lucide-react'
+import { loadPdfJs } from '@/hooks/use-pdf'
 import { cn } from '@/lib/utils'
-
-// Cache the pdf.js instance for the preview. We use worker-less mode
-// (workerSrc = '') because the worker can hang in some environments.
-let previewPdfjsPromise: Promise<any> | null = null
-async function loadPreviewPdfJs(): Promise<any> {
-  if (previewPdfjsPromise) return previewPdfjsPromise
-  previewPdfjsPromise = new Promise((resolve, reject) => {
-    const PDFJS_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js'
-    // If pdf.js is already loaded (by another component), reuse it but
-    // force worker-less mode.
-    if ((window as any).pdfjsLib) {
-      const pdfjs = (window as any).pdfjsLib
-      pdfjs.GlobalWorkerOptions.workerSrc = ''
-      resolve(pdfjs)
-      return
-    }
-    // Otherwise load pdf.js fresh.
-    const script = document.createElement('script')
-    script.src = PDFJS_URL
-    script.onload = () => {
-      const pdfjs = (window as any).pdfjsLib
-      if (!pdfjs) { reject(new Error('pdf.js failed to load')); return }
-      // Worker-less mode — no blob URL, no worker.
-      pdfjs.GlobalWorkerOptions.workerSrc = ''
-      resolve(pdfjs)
-    }
-    script.onerror = () => reject(new Error('Failed to load pdf.js'))
-    document.head.appendChild(script)
-  })
-  return previewPdfjsPromise
-}
 
 export interface PageNumberPreviewConfig {
   position: string
@@ -58,9 +28,7 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
   const canvasRef = React.useRef<HTMLCanvasElement>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
-  const [pageDims, setPageDims] = React.useState<{ w: number; h: number } | null>(null)
-  const [canvasReady, setCanvasReady] = React.useState(false)
-  const [canvasW, setCanvasW] = React.useState(0)
+  const [pageDims, setPageDims] = React.useState<{ w: number; h: number; renderW: number } | null>(null)
   const renderTaskRef = React.useRef<any>(null)
 
   // Render the first page to the canvas at a higher scale for a larger preview.
@@ -68,20 +36,13 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
     let cancelled = false
     setLoading(true)
     setError(null)
+    setPageDims(null)
 
     ;(async () => {
       try {
-        const pdfjs = await loadPreviewPdfJs()
-        // Use FileReader instead of file.arrayBuffer() — more reliable
-        // across different browser environments (some synthetic File
-        // objects from upload mechanisms fail with arrayBuffer()).
-        const buf: ArrayBuffer = await new Promise((resolve, reject) => {
-          const reader = new FileReader()
-          reader.onloadend = () => resolve(reader.result as ArrayBuffer)
-          reader.onerror = () => reject(new Error('Could not read file'))
-          reader.readAsArrayBuffer(file)
-        })
-        const doc = await pdfjs.getDocument({ data: new Uint8Array(buf), useWorkerFetch: false, isEvalSupported: false }).promise
+        const pdfjs = await loadPdfJs()
+        const buf = await file.arrayBuffer()
+        const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise
         if (cancelled) return
         const page = await doc.getPage(1)
         // Use a scale that gives a good preview size (~600px wide for A4).
@@ -96,17 +57,14 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
         const ctx = canvas.getContext('2d')!
         ctx.fillStyle = '#ffffff'
         ctx.fillRect(0, 0, canvas.width, canvas.height)
-        // Cancel any previous render task
         if (renderTaskRef.current) {
           try { renderTaskRef.current.cancel() } catch (_) {}
         }
         renderTaskRef.current = page.render({ canvasContext: ctx, viewport })
         await renderTaskRef.current.promise
         if (cancelled) return
-        // Store page dimensions in PDF points (scale 1) for overlay math.
-        setPageDims({ w: baseViewport.width, h: baseViewport.height })
-        setCanvasW(canvas.width)
-        setCanvasReady(true)
+        // Store page dimensions in PDF points (scale 1) + canvas width for overlay math.
+        setPageDims({ w: baseViewport.width, h: baseViewport.height, renderW: canvas.width })
         setLoading(false)
         try { await page.cleanup() } catch (_) {}
         try { await doc.destroy() } catch (_) {}
@@ -129,13 +87,9 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
   // Compute the overlay text + position (matching the worker's logic exactly).
   const overlay = React.useMemo(() => {
     if (!pageDims) return null
-    const { w: pw, h: ph } = pageDims
+    const { w: pw, h: ph, renderW } = pageDims
     const { position, fontSize, format, startNumber } = config
-    // Page 1 number = startNumber
     const num = startNumber
-    // Use a reasonable "total" for preview (1 page preview, but show actual
-    // format substitution). We don't know total pages here without loading
-    // the doc — use {total} = 1 for the preview.
     const text = String(format)
       .replace(/\{n\}/g, String(num))
       .replace(/\{total\}/g, '…')
@@ -150,9 +104,14 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
     else if (position === 'top-right') { x = pw - textWidth - margin; y = ph - margin - fontSize }
     else { x = margin; y = ph - margin - fontSize }
     // The worker draws text with y = baseline (bottom-left origin). For the
-    // overlay, we position relative to the canvas (top-left origin). Convert:
-    // canvas_y = pageHeight - baseline_y - fontSize (approx cap height).
-    return { text, x, y, fontSize, pw, ph }
+    // overlay (top-left origin): canvas_y = pageHeight - baseline_y - fontSize.
+    const scale = renderW / pw
+    return {
+      text,
+      leftPct: (x / pw) * 100,
+      topPct: ((ph - y - fontSize) / ph) * 100,
+      fontSizePx: fontSize * scale,
+    }
   }, [pageDims, config])
 
   return (
@@ -168,23 +127,20 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
           <p className="text-xs text-destructive">Preview failed: {error}</p>
         </div>
       )}
-      {!loading && !error && pageDims && canvasReady && (
+      {!loading && !error && pageDims && (
         <div
           className="relative mx-auto overflow-hidden rounded-xl border border-border bg-white shadow-md"
           style={{ maxWidth: '100%' }}
         >
           <canvas ref={canvasRef} className="block h-auto w-full" />
-          {/* Page number overlay — positioned using percentage math that
-              matches the worker's PDF-point coordinates. */}
           {overlay && (
             <div
-              className="pointer-events-none absolute font-sans text-gray-500"
+              className="pointer-events-none absolute whitespace-nowrap text-gray-500"
               style={{
-                left: `${(overlay.x / overlay.pw) * 100}%`,
-                top: `${((overlay.ph - overlay.y - overlay.fontSize) / overlay.ph) * 100}%`,
-                fontSize: `calc(${overlay.fontSize}pt * ${canvasW / overlay.pw})`,
+                left: `${overlay.leftPct}%`,
+                top: `${overlay.topPct}%`,
+                fontSize: `${overlay.fontSizePx}px`,
                 lineHeight: 1,
-                whiteSpace: 'nowrap',
                 fontFamily: 'Helvetica, Arial, sans-serif',
               }}
             >
