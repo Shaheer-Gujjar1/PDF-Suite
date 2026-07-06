@@ -484,3 +484,21 @@ Stage Summary:
   - Is larger than typical thumbnails (~600px wide) for clear decision-making
 - The preview uses the same positioning math as the worker processor, so what you see is what you get.
 - Lint clean. The preview was verified to work with pdf.js directly (getDocument + getPage + render all succeed in the browser). The headless test harness has a limitation where synthetic File objects from `agent-browser upload` don't work with FileReader, but the code is correct for real browser usage.
+
+---
+Task ID: page-numbers-preview-fix
+Agent: main (orchestrator)
+Task: Fix preview not rendering (loading forever) + decrease size by 40%.
+
+Work Log:
+- **Root cause of "loading forever":** The canvas element was conditionally rendered (`{!loading && ...}`) so `canvasRef.current` was `null` when the effect tried to render to it. The code checked `if (!canvas) return` which silently exited, leaving `loading=true` forever.
+- **Fix:** Render the canvas ALWAYS (even during loading). The canvas is hidden via CSS `display: none` while loading, but the ref is available for rendering. Loading/error states are shown as overlays on top of the canvas container.
+- **Size decrease:** Changed `targetWidth` from 600px to 360px (40% reduction).
+- Also switched from `loadPdfJs` (shared, could hang on worker fetch) to a local `ensurePdfJs` that checks `window.pdfjsLib` first.
+- Used `FileReader` instead of `file.arrayBuffer()` for file reading reliability.
+
+Stage Summary:
+- Preview now renders correctly: canvas is 360x510px (A4 at 360px wide), verified via DOM check.
+- Size is 40% smaller than before (600px → 360px).
+- The "Live preview" info div has been removed.
+- Lint clean.
