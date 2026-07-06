@@ -415,13 +415,22 @@ function PageNumberOptions({
           </SelectContent>
         </Select>
       </OptionRow>
-      <OptionRow label="Format" hint="Use {n} for the page number, {total} for total.">
-        <Input
-          value={format}
-          onChange={(e) => set('format', e.target.value)}
-          placeholder="{n} / {total}"
-          className="font-mono"
-        />
+      <OptionRow label="Format" hint="Numbering style for pages.">
+        <Select value={format} onValueChange={(v) => set('format', v)}>
+          <SelectTrigger className="w-full sm:w-[220px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="{n}">1, 2, 3…</SelectItem>
+            <SelectItem value="{n} / {total}">1 / 5, 2 / 5…</SelectItem>
+            <SelectItem value="Page {n}">Page 1, Page 2…</SelectItem>
+            <SelectItem value="- {n} -">– 1 –, – 2 –…</SelectItem>
+            <SelectItem value="{roman}">i, ii, iii… (lowercase Roman)</SelectItem>
+            <SelectItem value="{Roman}">I, II, III… (uppercase Roman)</SelectItem>
+            <SelectItem value="{alpha}">a, b, c… (lowercase letters)</SelectItem>
+            <SelectItem value="{Alpha}">A, B, C… (uppercase letters)</SelectItem>
+          </SelectContent>
+        </Select>
       </OptionRow>
       <OptionRow label="Start at" hint="First page number value.">
         <Input

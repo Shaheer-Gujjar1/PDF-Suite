@@ -661,6 +661,41 @@ processors['unlock'] = async function (inputs, opts, onProgress, log) {
 };
 
 /* ---- Page Numbers ------------------------------------------------------ */
+/* Convert a number to lowercase Roman numerals (1→i, 4→iv, etc). */
+function toRoman(num) {
+  if (num < 1) return String(num);
+  var vals = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1];
+  var syms = ['m', 'cm', 'd', 'cd', 'c', 'xc', 'l', 'xl', 'x', 'ix', 'v', 'iv', 'i'];
+  var result = '';
+  for (var i = 0; i < vals.length; i++) {
+    while (num >= vals[i]) { result += syms[i]; num -= vals[i]; }
+  }
+  return result;
+}
+
+/* Convert a number to lowercase letters (1→a, 2→b, 26→z, 27→aa). */
+function toAlpha(num) {
+  if (num < 1) return String(num);
+  var result = '';
+  while (num > 0) {
+    var rem = (num - 1) % 26;
+    result = String.fromCharCode(97 + rem) + result;
+    num = Math.floor((num - 1) / 26);
+  }
+  return result;
+}
+
+/* Substitute format placeholders: {n}, {total}, {roman}, {Roman}, {alpha}, {Alpha}. */
+function formatPageNumber(formatStr, num, total) {
+  return String(formatStr)
+    .replace(/\{n\}/g, String(num))
+    .replace(/\{total\}/g, String(total))
+    .replace(/\{roman\}/g, toRoman(num))
+    .replace(/\{Roman\}/g, toRoman(num).toUpperCase())
+    .replace(/\{alpha\}/g, toAlpha(num))
+    .replace(/\{Alpha\}/g, toAlpha(num).toUpperCase());
+}
+
 processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
   var fontSize = (opts && Number(opts.fontSize)) || 11;
@@ -676,7 +711,7 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
     var pages = doc.getPages();
     for (var p = 0; p < pages.length; p++) {
       var num = startNum + p;
-      var text = String(format).replace(/\{n\}/g, String(num)).replace(/\{total\}/g, String(pages.length));
+      var text = formatPageNumber(format, num, pages.length);
       var w = font.widthOfTextAtSize(text, fontSize);
       var pw = pages[p].getWidth(), ph = pages[p].getHeight();
       var x, y;

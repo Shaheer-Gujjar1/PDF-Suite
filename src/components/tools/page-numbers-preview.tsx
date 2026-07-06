@@ -126,9 +126,29 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
     const { w: pw, h: ph, renderW } = pageDims
     const { position, fontSize, format, startNumber, margin } = config
     const num = startNumber
+    // Roman numeral conversion (matching the worker's toRoman function).
+    const toRoman = (n: number): string => {
+      if (n < 1) return String(n)
+      const vals = [1000,900,500,400,100,90,50,40,10,9,5,4,1]
+      const syms = ['m','cm','d','cd','c','xc','l','xl','x','ix','v','iv','i']
+      let r = ''
+      for (let i = 0; i < vals.length; i++) { while (n >= vals[i]) { r += syms[i]; n -= vals[i] } }
+      return r
+    }
+    // Letter conversion (matching the worker's toAlpha function).
+    const toAlpha = (n: number): string => {
+      if (n < 1) return String(n)
+      let r = ''
+      while (n > 0) { const rem = (n - 1) % 26; r = String.fromCharCode(97 + rem) + r; n = Math.floor((n - 1) / 26) }
+      return r
+    }
     const text = String(format)
       .replace(/\{n\}/g, String(num))
       .replace(/\{total\}/g, '…')
+      .replace(/\{roman\}/g, toRoman(num))
+      .replace(/\{Roman\}/g, toRoman(num).toUpperCase())
+      .replace(/\{alpha\}/g, toAlpha(num))
+      .replace(/\{Alpha\}/g, toAlpha(num).toUpperCase())
     // Approximate text width: average char width ≈ 0.5 × fontSize for Helvetica
     const textWidth = text.length * fontSize * 0.5
     let x: number, y: number
