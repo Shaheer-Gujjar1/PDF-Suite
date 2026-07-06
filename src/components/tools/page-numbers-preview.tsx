@@ -152,11 +152,11 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
   return (
     <div className={cn('relative', className)}>
       <div
-        className="relative mx-auto overflow-hidden rounded-xl border border-border bg-white shadow-md"
-        style={{ maxWidth: '100%', minHeight: loading || error ? '400px' : 'auto' }}
+        className="relative mx-auto inline-block overflow-hidden rounded-xl border border-border bg-white shadow-md"
+        style={{ maxWidth: '100%', minHeight: loading || error ? '400px' : 'auto', display: loading || error ? 'block' : 'inline-block' }}
       >
         {/* Canvas is always rendered so the ref is available for rendering. */}
-        <canvas ref={canvasRef} className="block h-auto w-full" style={{ display: loading || error ? 'none' : 'block' }} />
+        <canvas ref={canvasRef} className="block h-auto" style={{ display: loading || error ? 'none' : 'block', maxWidth: '100%' }} />
         {/* Page number overlay */}
         {!loading && !error && overlay && (
           <div
