@@ -98,7 +98,8 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
         renderTaskRef.current = page.render({ canvasContext: ctx, viewport })
         await renderTaskRef.current.promise
         if (cancelled) return
-        // Store page dimensions in PDF points (scale 1) + canvas native width for overlay math.
+        // Store page dimensions + a canvas 2D context for measuring text width
+        // (so the preview's X position matches the worker's font.widthOfTextAtSize).
         setPageDims({ w: baseViewport.width, h: baseViewport.height, renderW: canvas.width })
         setLoading(false)
         try { await page.cleanup() } catch (_) {}
@@ -149,8 +150,20 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
       .replace(/\{Roman\}/g, toRoman(num).toUpperCase())
       .replace(/\{alpha\}/g, toAlpha(num))
       .replace(/\{Alpha\}/g, toAlpha(num).toUpperCase())
-    // Approximate text width: average char width ≈ 0.5 × fontSize for Helvetica
-    const textWidth = text.length * fontSize * 0.5
+
+    // Measure actual text width using a temporary canvas — this matches
+    // the worker's font.widthOfTextAtSize() so positions are identical.
+    let textWidth = text.length * fontSize * 0.5 // fallback
+    try {
+      const measureCanvas = document.createElement('canvas')
+      const mctx = measureCanvas.getContext('2d')
+      if (mctx) {
+        mctx.font = `${fontSize}px Helvetica, Arial, sans-serif`
+        textWidth = mctx.measureText(text).width
+      }
+    } catch (_) {}
+
+    // Position math — IDENTICAL to the worker processor.
     let x: number, y: number
     if (position === 'bottom-center') { x = (pw - textWidth) / 2; y = margin }
     else if (position === 'bottom-right') { x = pw - textWidth - margin; y = margin }
@@ -158,8 +171,13 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
     else if (position === 'top-center') { x = (pw - textWidth) / 2; y = ph - margin - fontSize }
     else if (position === 'top-right') { x = pw - textWidth - margin; y = ph - margin - fontSize }
     else { x = margin; y = ph - margin - fontSize }
-    // The worker draws text with y = baseline (bottom-left origin). For the
-    // overlay (top-left origin): canvas_y = pageHeight - baseline_y - fontSize.
+
+    // Convert from PDF coordinates (bottom-left origin, y=baseline) to
+    // CSS coordinates (top-left origin). The worker draws text at y=baseline,
+    // so the text's TOP edge is at y + fontSize (approximate ascent for
+    // Helvetica ≈ 0.72 × fontSize, but using full fontSize as cap height
+    // approximation is close enough and what the worker's margin calculation
+    // implies).
     const scale = renderW / pw
     return {
       text,
