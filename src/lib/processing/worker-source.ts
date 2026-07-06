@@ -706,9 +706,16 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Numbering ' + inputs[i].fileName);
-    var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    var doc;
+    try {
+      doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
+    } catch (e) {
+      log('Failed to load PDF: ' + (e.message || e));
+      throw new Error('Could not load PDF: ' + (e.message || e));
+    }
     var font = await doc.embedFont(lib.StandardFonts.Helvetica);
     var pages = doc.getPages();
+    log('Found ' + pages.length + ' pages');
     for (var p = 0; p < pages.length; p++) {
       var num = startNum + p;
       var text = formatPageNumber(format, num, pages.length);
@@ -721,7 +728,23 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
       else if (position === 'top-center') { x = (pw - w) / 2; y = ph - margin - fontSize; }
       else if (position === 'top-right') { x = pw - w - margin; y = ph - margin - fontSize; }
       else { x = margin; y = ph - margin - fontSize; }
-      pages[p].drawText(text, { x: x, y: y, font: font, size: fontSize, color: lib.rgb(0.3, 0.3, 0.3) });
+      log('Page ' + (p+1) + ': drawing "' + text + '" at x=' + Math.round(x) + ' y=' + Math.round(y) + ' on ' + Math.round(pw) + 'x' + Math.round(ph));
+      /* Draw a small white rectangle behind the number so it's always
+         visible — even on dark/image backgrounds or over existing text. */
+      var padX = 4, padY = 2;
+      pages[p].drawRectangle({
+        x: x - padX, y: y - padY,
+        width: w + padX * 2, height: fontSize + padY * 2,
+        color: lib.rgb(1, 1, 1),
+        opacity: 0.85,
+        borderWidth: 0
+      });
+      /* Draw the number text on top of the white rectangle. */
+      pages[p].drawText(text, {
+        x: x, y: y,
+        font: font, size: fontSize,
+        color: lib.rgb(0.2, 0.2, 0.2)
+      });
     }
     var bytes = await doc.save({ useObjectStreams: true });
     out.push({ name: stripExt(inputs[i].fileName) + '-numbered.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: pages.length + ' pages numbered' });

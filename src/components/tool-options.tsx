@@ -39,7 +39,7 @@ export function defaultOptions(toolId: string): ToolOptionsMap {
     case 'unlock':
       return { password: '' }
     case 'page-numbers':
-      return { position: 'bottom-center', fontSize: 11, format: '{n}', startNumber: 1 }
+      return { position: 'bottom-center', fontSize: 11, format: '{n}', startNumber: 1, margin: 28 }
     case 'watermark':
       return { text: 'CONFIDENTIAL', fontSize: 50, opacity: 15 }
     case 'protect':
