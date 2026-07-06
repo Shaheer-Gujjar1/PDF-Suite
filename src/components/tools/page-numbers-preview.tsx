@@ -36,6 +36,7 @@ export interface PageNumberPreviewConfig {
   fontSize: number
   format: string
   startNumber: number
+  margin: number
 }
 
 interface PageNumbersPreviewProps {
@@ -120,14 +121,13 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
   const overlay = React.useMemo(() => {
     if (!pageDims) return null
     const { w: pw, h: ph, renderW } = pageDims
-    const { position, fontSize, format, startNumber } = config
+    const { position, fontSize, format, startNumber, margin } = config
     const num = startNumber
     const text = String(format)
       .replace(/\{n\}/g, String(num))
       .replace(/\{total\}/g, '…')
     // Approximate text width: average char width ≈ 0.5 × fontSize for Helvetica
     const textWidth = text.length * fontSize * 0.5
-    const margin = 28
     let x: number, y: number
     if (position === 'bottom-center') { x = (pw - textWidth) / 2; y = margin }
     else if (position === 'bottom-right') { x = pw - textWidth - margin; y = margin }

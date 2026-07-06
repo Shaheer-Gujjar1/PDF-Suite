@@ -695,6 +695,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
                 fontSize: Number(options.fontSize ?? 11),
                 format: (options.format as string) || '{n}',
                 startNumber: Number(options.startNumber ?? 1),
+                margin: Number(options.margin ?? 28),
               }}
             />
           </div>

@@ -397,6 +397,7 @@ function PageNumberOptions({
   const fontSize = Number(options.fontSize ?? 11)
   const format = (options.format as string) || '{n}'
   const startNumber = Number(options.startNumber ?? 1)
+  const margin = Number(options.margin ?? 28)
   return (
     <div className="space-y-4">
       <OptionRow label="Position" hint="Where the number appears on each page.">
@@ -438,6 +439,16 @@ function PageNumberOptions({
           max={24}
           step={1}
           onValueChange={(v) => set('fontSize', v[0])}
+          className="w-full sm:w-[220px]"
+        />
+      </OptionRow>
+      <OptionRow label={`Margin · ${margin}pt`} hint="Distance from the page edge.">
+        <Slider
+          value={[margin]}
+          min={10}
+          max={80}
+          step={1}
+          onValueChange={(v) => set('margin', v[0])}
           className="w-full sm:w-[220px]"
         />
       </OptionRow>

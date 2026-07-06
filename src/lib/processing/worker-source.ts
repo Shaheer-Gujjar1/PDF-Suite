@@ -667,6 +667,7 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
   var position = (opts && opts.position) || 'bottom-center';
   var format = (opts && opts.format) || '{n}';
   var startNum = (opts && Number(opts.startNumber)) || 1;
+  var margin = (opts && Number(opts.margin)) || 28;
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Numbering ' + inputs[i].fileName);
@@ -678,7 +679,6 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
       var text = String(format).replace(/\{n\}/g, String(num)).replace(/\{total\}/g, String(pages.length));
       var w = font.widthOfTextAtSize(text, fontSize);
       var pw = pages[p].getWidth(), ph = pages[p].getHeight();
-      var margin = 28;
       var x, y;
       if (position === 'bottom-center') { x = (pw - w) / 2; y = margin; }
       else if (position === 'bottom-right') { x = pw - w - margin; y = margin; }
