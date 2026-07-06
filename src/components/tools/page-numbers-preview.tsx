@@ -77,15 +77,18 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
         const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise
         if (cancelled) return
         const page = await doc.getPage(1)
-        // Use a scale that gives a good preview size (~360px wide for A4).
+        // Render at 2x the display size for crisp (non-blurry) preview.
+        // Display width = 360px, render width = 720px (retina).
         const baseViewport = page.getViewport({ scale: 1 })
-        const targetWidth = 360
-        const renderScale = Math.min(targetWidth / baseViewport.width, 2.0)
+        const displayWidth = 360
+        const dpr = 2
+        const renderScale = Math.min((displayWidth * dpr) / baseViewport.width, 4.0)
         const viewport = page.getViewport({ scale: renderScale })
         const canvas = canvasRef.current
         if (!canvas) return
         canvas.width = Math.ceil(viewport.width)
         canvas.height = Math.ceil(viewport.height)
+        canvas.style.maxWidth = displayWidth + 'px'
         const ctx = canvas.getContext('2d')!
         ctx.fillStyle = '#ffffff'
         ctx.fillRect(0, 0, canvas.width, canvas.height)
@@ -95,7 +98,7 @@ export function PageNumbersPreview({ file, config, className }: PageNumbersPrevi
         renderTaskRef.current = page.render({ canvasContext: ctx, viewport })
         await renderTaskRef.current.promise
         if (cancelled) return
-        // Store page dimensions in PDF points (scale 1) + canvas width for overlay math.
+        // Store page dimensions in PDF points (scale 1) + canvas native width for overlay math.
         setPageDims({ w: baseViewport.width, h: baseViewport.height, renderW: canvas.width })
         setLoading(false)
         try { await page.cleanup() } catch (_) {}
