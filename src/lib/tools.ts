@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 
 export type ToolCategory =
+  | "image"
   | "organize"
   | "optimize"
   | "convert-to-pdf"
@@ -37,7 +38,8 @@ export type AccentColor =
   | "emerald"
   | "teal"
   | "fuchsia"
-  | "violet";
+  | "violet"
+  | "orange";
 
 export interface Tool {
   id: string;
@@ -68,6 +70,12 @@ export interface CategoryMeta {
 }
 
 export const categories: CategoryMeta[] = [
+  {
+    id: "image",
+    name: "Image",
+    tagline: "Crop, resize and polish your images.",
+    accent: "orange",
+  },
   {
     id: "organize",
     name: "Organize",
@@ -107,6 +115,19 @@ export const categories: CategoryMeta[] = [
 ];
 
 export const tools: Tool[] = [
+  // ---------- Image ----------
+  {
+    id: "crop-images",
+    name: "Crop Images",
+    description:
+      "Visually crop JPG, PNG and WebP images one by one — batch them and download each or all as ZIP.",
+    category: "image",
+    icon: Crop,
+    accent: "orange",
+    batch: true,
+    step: 7,
+  },
+
   // ---------- Organize ----------
   {
     id: "merge",
@@ -401,6 +422,15 @@ export const accentClasses: Record<
     gradient: "from-violet-500 to-purple-600",
     text: "text-violet-600 dark:text-violet-400",
     soft: "bg-violet-500/5",
+  },
+  orange: {
+    badge: "bg-orange-500/10 text-orange-600 dark:text-orange-400",
+    dot: "bg-orange-500",
+    ring: "ring-orange-500/20",
+    glow: "group-hover:shadow-orange-500/25",
+    gradient: "from-orange-500 to-red-600",
+    text: "text-orange-600 dark:text-orange-400",
+    soft: "bg-orange-500/5",
   },
 };
 

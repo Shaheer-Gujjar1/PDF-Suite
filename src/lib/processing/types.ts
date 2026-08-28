@@ -33,6 +33,8 @@ export type ProcessorType =
   | 'crop'
   | 'sign-annotate'
   | 'edit-text'
+  // Step 7 — Image tools
+  | 'crop-images'
 
 export interface ProcessInput {
   id: string

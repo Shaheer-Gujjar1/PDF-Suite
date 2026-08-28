@@ -1954,6 +1954,47 @@ processors['edit-text'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Crop Images (visual batch crop) ------------------------------------ */
+/* opts.crops: { [fileName]: { x, y, width, height } } in natural pixels.   */
+/* Crops via OffscreenCanvas, preserving the source format (jpg/png/webp).  */
+processors['crop-images'] = async function (inputs, opts, onProgress, log) {
+  var crops = (opts && opts.crops) || {};
+  var quality = opts && typeof opts.quality === 'number' ? opts.quality : 0.92;
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    log('Cropping ' + input.fileName);
+    var crop = crops[input.fileName];
+    if (!crop) { onProgress((i + 1) / inputs.length); continue; }
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp = await createImageBitmap(blob);
+    var sx = Math.max(0, Math.min(Math.round(crop.x), bmp.width - 1));
+    var sy = Math.max(0, Math.min(Math.round(crop.y), bmp.height - 1));
+    var sw = Math.max(1, Math.min(Math.round(crop.width), bmp.width - sx));
+    var sh = Math.max(1, Math.min(Math.round(crop.height), bmp.height - sy));
+    var canvas = new OffscreenCanvas(sw, sh);
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+    var ext = (input.fileName.split('.').pop() || '').toLowerCase();
+    var mime = 'image/png';
+    var outExt = 'png';
+    if (ext === 'jpg' || ext === 'jpeg') { mime = 'image/jpeg'; outExt = 'jpg'; }
+    else if (ext === 'webp') { mime = 'image/webp'; outExt = 'webp'; }
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: quality });
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '-cropped.' + outExt,
+      data: buf,
+      mime: mime,
+      note: sw + 'x' + sh + ' px',
+    });
+    if (bmp.close) bmp.close();
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;
