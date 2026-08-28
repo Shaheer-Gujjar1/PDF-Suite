@@ -39,6 +39,7 @@ import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
 import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
 import { EditTextView, type EditResult } from '@/components/tools/edit-text-view'
 import { CropImagesView, type CropImagesResult } from '@/components/tools/crop-images-view'
+import { ConvertImagesView, type ConvertImagesResult } from '@/components/tools/convert-images-view'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -67,6 +68,8 @@ function getInput(tool: Tool): InputConfig {
   switch (tool.id) {
     case 'crop-images':
       return { accept: 'image/jpeg,image/jpg,image/png,image/webp', multiple: true, hint: 'JPG, PNG, WEBP images', mode: 'files' }
+    case 'convert-images':
+      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'images-to-pdf':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF', mode: 'files' }
     case 'word-to-pdf':
@@ -80,7 +83,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -92,7 +95,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -111,6 +114,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isPdfToExcel = tool.id === 'pdf-to-excel'
   const isPageNumbers = tool.id === 'page-numbers'
   const isCropImages = tool.id === 'crop-images'
+  const isConvertImages = tool.id === 'convert-images'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -180,8 +184,9 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         .map((f) => ({ id: f.id, file: f.file }))
     : []
 
-  // Crop Images: stable identity so the view's emit effect does not loop.
-  const cropImageFiles = React.useMemo(
+  // Interactive image tools (crop / convert): stable identity so the view's
+  // emit effect does not loop.
+  const stableImageFiles = React.useMemo(
     () => files.map((f) => ({ id: f.id, file: f.file })),
     [files]
   )
@@ -416,6 +421,19 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
       }
       runOptions = { ...options, crops: cropMap }
+    } else if (isConvertImages) {
+      // Convert Images: every file is processed, per-file, each with its own
+      // target format chosen in the interactive view.
+      const convRes = interactiveResult as ConvertImagesResult | null
+      for (const qf of files) {
+        const data = await qf.file.arrayBuffer()
+        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+      }
+      runOptions = {
+        ...options,
+        formats: convRes?.formats ?? {},
+        quality: convRes?.quality ?? 0.92,
+      }
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
@@ -602,7 +620,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept={isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
+          accept={isConvertImages ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -657,7 +675,14 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           />
         ) : isCropImages && files.length > 0 ? (
           <CropImagesView
-            files={cropImageFiles}
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isConvertImages && files.length > 0 ? (
+          <ConvertImagesView
+            files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}
             onChange={setInteractiveResult}

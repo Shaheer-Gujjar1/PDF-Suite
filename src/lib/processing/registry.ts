@@ -27,6 +27,7 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   'sign-annotate': 'sign-annotate',
   'edit-text': 'edit-text',
   'crop-images': 'crop-images',
+  'convert-images': 'convert-images',
 }
 
 export function getProcessor(toolId: string): ProcessorType {

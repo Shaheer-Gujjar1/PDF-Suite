@@ -1995,6 +1995,62 @@ processors['crop-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Convert Images (any format -> PNG/JPG/JPEG/WEBP) ------------------- */
+/* opts.formats: { [fileName]: 'png' | 'jpg' | 'jpeg' | 'webp' } — each file */
+/* gets its own target format. opts.quality (0..1) applies to lossy targets. */
+/* Decoding uses the browser's native image decoder, so every format the     */
+/* browser can display (jpg, png, webp, gif, bmp, avif, ico...) works.       */
+processors['convert-images'] = async function (inputs, opts, onProgress, log) {
+  var formats = (opts && opts.formats) || {};
+  var quality = opts && typeof opts.quality === 'number' ? opts.quality : 0.92;
+  var TARGET_MIME = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+  };
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var target = formats[input.fileName] || 'png';
+    if (!TARGET_MIME[target]) target = 'png';
+    log('Converting ' + input.fileName + ' -> ' + target.toUpperCase());
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var canvas = new OffscreenCanvas(bmp.width, bmp.height);
+    var ctx = canvas.getContext('2d');
+    if (target === 'jpg' || target === 'jpeg') {
+      /* JPEG has no alpha channel — flatten transparency onto white. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, bmp.width, bmp.height);
+    }
+    ctx.drawImage(bmp, 0, 0);
+    var outBlob = await canvas.convertToBlob({ type: TARGET_MIME[target], quality: quality });
+    if (outBlob.type && outBlob.type !== TARGET_MIME[target]) {
+      if (bmp.close) bmp.close();
+      throw new Error('This browser cannot encode ' + target.toUpperCase() + ' images.');
+    }
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '.' + target,
+      data: buf,
+      mime: TARGET_MIME[target],
+      note: bmp.width + 'x' + bmp.height + ' px',
+    });
+    if (bmp.close) bmp.close();
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

@@ -35,6 +35,7 @@ export type ProcessorType =
   | 'edit-text'
   // Step 7 — Image tools
   | 'crop-images'
+  | 'convert-images'
 
 export interface ProcessInput {
   id: string

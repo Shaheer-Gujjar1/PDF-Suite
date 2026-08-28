@@ -21,6 +21,7 @@ import {
   Type,
   ShieldCheck,
   Combine,
+  Repeat,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -126,6 +127,19 @@ export const tools: Tool[] = [
     accent: "orange",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+  {
+    id: "convert-images",
+    name: "Convert Images",
+    description:
+      "Convert any image — JPG, PNG, WEBP, GIF, BMP and more — to PNG, JPG or WEBP. Pick a format per file, download each or all as ZIP.",
+    category: "image",
+    icon: Repeat,
+    accent: "orange",
+    batch: true,
+    step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   // ---------- Organize ----------

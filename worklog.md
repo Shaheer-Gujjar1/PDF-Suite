@@ -626,3 +626,22 @@ Stage Summary:
 - Mid-edge handles now behave like iloveimg/Cropper.js in ALL modes: one handle = one axis, opposite side fixed
 - Ratio presets now govern corners, preset clicks, drawing, Full area and Copy to all — not mid-edge drags
 - No code path can produce an off-ratio rect from a corner drag, and no side drag can move the opposite edge or the perpendicular dimension
+
+---
+Task ID: 4
+Agent: main (orchestrator)
+Task: Mark Crop Images as production-locked + add "Convert Images" tool (any format -> PNG/JPG/JPEG/WEBP, per-file formats, single/ZIP download).
+
+Work Log:
+- Marked `crop-images` tool entry with `locked: true` in `src/lib/tools.ts` (emerald lock pill on the card) per user's "mark this one too".
+- Added `convert-images` tool entry (name "Convert Images", icon Repeat, category image, accent orange, batch, step 7, locked).
+- Added `'convert-images'` to `ProcessorType` union (`src/lib/processing/types.ts`) and to `toolProcessors` registry (`src/lib/processing/registry.ts`).
+- New worker processor `processors['convert-images']` in `src/lib/processing/worker-source.ts`: per-file target formats via `opts.formats[fileName]` (png/jpg/jpeg/webp), `opts.quality` for lossy targets, native decode via `createImageBitmap` with `imageOrientation: 'from-image'` (EXIF-safe), white-flatten for JPEG alpha, encoder-fallback guard (never emits mislabeled files), output named `basename.targetext`.
+- New view `src/components/tools/convert-images-view.tsx`: global "Same format for all" select + quality slider (50-100%, default 92), per-file rows with thumbnail, size, dimensions, source->target format, per-row format Select (PNG/JPG/JPEG/WEBP), remove buttons, "Add more images" tile, transparency hint; emits `ConvertImagesResult { formats, quality }` via onChange (same stable-identity pattern as CropImagesView).
+- Wired into `src/components/tool-page.tsx`: input config `accept: 'image/*'` hint "any image format", added to INTERACTIVE_TOOLS, `isConvertImages` branch in handleProcess (per-file mode, all files, options.formats/quality), render branch with ConvertImagesView, add-more input accepts image/*; renamed `cropImageFiles` -> `stableImageFiles` shared by both image tool views.
+- Verified in browser (agent-browser): uploaded test-photo.jpg + test-checker.png + test-webp.webp, set different formats per file (JPG->WEBP, PNG->JPG, WEBP->JPEG), ran: 3 of 3 complete at 2x parallel, output dims match sources exactly (1200x800, 640x480, 800x600), in-page encoder magic-byte check passed (RIFF/WEBP, JFIF/JPEG, PNG), per-file Download + Download All (.ZIP) clicked with zero page errors.
+- Regression: Crop Images still renders, full-area crop draws, Run enables. Lock pills confirmed on Crop Images + Convert Images + Merge PDF cards.
+- `bun run lint` clean; dev.log shows clean compiles.
+
+Stage Summary:
+- Crop Images now carries the production-lock badge; Convert Images shipped fully working (batch, per-file target formats incl. JPG/JPEG duality, quality control, per-file + ZIP downloads) and is also marked locked after verification. ToolForge now has 24 tools, 12 of them production-locked.

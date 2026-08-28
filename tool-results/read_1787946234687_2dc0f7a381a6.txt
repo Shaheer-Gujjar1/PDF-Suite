@@ -1,0 +1,856 @@
+     1→'use client'
+     2→
+     3→import * as React from 'react'
+     4→import { motion, AnimatePresence } from 'framer-motion'
+     5→import {
+     6→  ArrowLeft,
+     7→  Layers,
+     8→  Sparkles,
+     9→  Wand2,
+    10→  ChevronRight,
+    11→  Loader2,
+    12→  Cpu,
+    13→} from 'lucide-react'
+    14→import { Button } from '@/components/ui/button'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { toast } from 'sonner'
+    17→import { PrivacyBadge } from '@/components/privacy-badge'
+    18→import { Dropzone, type QueuedFile } from '@/components/dropzone'
+    19→import { ProcessingPanel } from '@/components/processing-panel'
+    20→import {
+    21→  ToolOptions,
+    22→  hasOptions,
+    23→  defaultOptions,
+    24→  type ToolOptionsMap,
+    25→} from '@/components/tool-options'
+    26→import { MergeView, type MergeFile } from '@/components/tools/merge-view'
+    27→import { SplitView, type SplitConfig } from '@/components/tools/split-view'
+    28→import { RotateView, type RotateConfig } from '@/components/tools/rotate-view'
+    29→import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/images-to-pdf-view'
+    30→import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
+    31→import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
+    32→import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
+    33→import { PdfToExcelView } from '@/components/tools/pdf-to-excel-view'
+    34→import { PageNumbersPreview } from '@/components/tools/page-numbers-preview'
+    35→import { renderDocxToPages } from '@/lib/docx-renderer'
+    36→import { renderXlsxToPages } from '@/lib/xlsx-renderer'
+    37→import { OrganizePdfView, type OrganizeResult } from '@/components/tools/organize-view'
+    38→import { CropPdfView, type CropResult } from '@/components/tools/crop-view'
+    39→import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
+    40→import { EditTextView, type EditResult } from '@/components/tools/edit-text-view'
+    41→import { CropImagesView, type CropImagesResult } from '@/components/tools/crop-images-view'
+    42→import { useProcessing } from '@/hooks/use-processing'
+    43→import { getProcessor, isImplemented } from '@/lib/processing/registry'
+    44→import {
+    45→  type Tool,
+    46→  type ToolCategory,
+    47→  accentClasses,
+    48→  tools,
+    49→  categoryMeta,
+    50→} from '@/lib/tools'
+    51→import { cn } from '@/lib/utils'
+    52→
+    53→interface ToolPageProps {
+    54→  tool: Tool
+    55→  onNavigate: (to: string) => void
+    56→  onBack: () => void
+    57→}
+    58→
+    59→interface InputConfig {
+    60→  accept: string
+    61→  multiple: boolean
+    62→  hint: string
+    63→  mode: 'files' | 'text'
+    64→}
+    65→
+    66→function getInput(tool: Tool): InputConfig {
+    67→  switch (tool.id) {
+    68→    case 'crop-images':
+    69→      return { accept: 'image/jpeg,image/jpg,image/png,image/webp', multiple: true, hint: 'JPG, PNG, WEBP images', mode: 'files' }
+    70→    case 'images-to-pdf':
+    71→      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF', mode: 'files' }
+    72→    case 'word-to-pdf':
+    73→      return { accept: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document', multiple: true, hint: 'Word .docx files', mode: 'files' }
+    74→    case 'excel-to-pdf':
+    75→      return { accept: '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', multiple: true, hint: 'Excel .xlsx files', mode: 'files' }
+    76→    case 'html-to-pdf':
+    77→      return { accept: '', multiple: false, hint: 'Paste your HTML', mode: 'text' }
+    78→    default:
+    79→      return { accept: 'application/pdf', multiple: tool.batch, hint: 'PDF files', mode: 'files' }
+    80→  }
+    81→}
+    82→
+    83→const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images']
+    84→
+    85→export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
+    86→  const a = accentClasses[tool.accent]
+    87→  const Icon = tool.icon
+    88→  const cfg = getInput(tool)
+    89→  const [files, setFiles] = React.useState<QueuedFile[]>([])
+    90→  const [html, setHtml] = React.useState('')
+    91→  const [options, setOptions] = React.useState<ToolOptionsMap>(() =>
+    92→    defaultOptions(tool.id)
+    93→  )
+    94→  const [interactiveResult, setInteractiveResult] = React.useState<
+    95→    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | null
+    96→  >(null)
+    97→  const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
+    98→  const [wordOrder, setWordOrder] = React.useState<string[]>([])
+    99→  const addMoreInputRef = React.useRef<HTMLInputElement>(null)
+   100→  const implemented = isImplemented(tool.id)
+   101→  const preview = !implemented
+   102→  const isInteractive = INTERACTIVE_TOOLS.includes(tool.id)
+   103→  const isMerge = tool.id === 'merge'
+   104→  const isSplit = tool.id === 'split'
+   105→  const isRotate = tool.id === 'rotate'
+   106→  const isImagesToPdf = tool.id === 'images-to-pdf'
+   107→  const isPdfToImages = tool.id === 'pdf-to-images'
+   108→  const isWordToPdf = tool.id === 'word-to-pdf'
+   109→  const isExcelToPdf = tool.id === 'excel-to-pdf'
+   110→  const isHtmlToPdf = tool.id === 'html-to-pdf'
+   111→  const isPdfToExcel = tool.id === 'pdf-to-excel'
+   112→  const isPageNumbers = tool.id === 'page-numbers'
+   113→  const isCropImages = tool.id === 'crop-images'
+   114→  const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
+   115→  const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
+   116→  const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
+   117→    pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [],
+   118→  })
+   119→  const [pdfToImagesConfig, setPdfToImagesConfig] = React.useState<PdfToImagesConfig>({
+   120→    mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2,
+   121→  })
+   122→  const [htmlConfig, setHtmlConfig] = React.useState<HtmlToPdfConfig>({
+   123→    html: '', orientation: 'portrait', pageSize: 'a4',
+   124→    screenWidth: 'desktop', onePage: false, margin: 0,
+   125→  })
+   126→
+   127→  const processing = useProcessing()
+   128→  // True while the main thread pre-renders pages / runs OCR (before run()).
+   129→  // Without this, the button shows no feedback during the ~30-60s OCR phase.
+   130→  const [preparing, setPreparing] = React.useState(false)
+   131→  const [prepareMsg, setPrepareMsg] = React.useState('')
+   132→
+   133→  const related = tools
+   134→    .filter((t) => t.category === tool.category && t.id !== tool.id)
+   135→    .slice(0, 4)
+   136→
+   137→  const cat = categoryMeta(tool.category as ToolCategory)
+   138→
+   139→  // Reset state when switching tools.
+   140→  React.useEffect(() => {
+   141→    setFiles([])
+   142→    setHtml('')
+   143→    setOptions(defaultOptions(tool.id))
+   144→    setInteractiveResult(null)
+   145→    setMergeOrder([])
+   146→    setWordOrder([])
+   147→    setSplitConfig({ mode: 'each', ranges: '' })
+   148→    setRotateConfig({ angle: 90 })
+   149→    setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
+   150→    setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
+   151→    setHtmlConfig({ html: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
+   152→  }, [tool.id])
+   153→
+   154→  // Sync mergeOrder/wordOrder when files change
+   155→  React.useEffect(() => {
+   156→    if (isMerge || isWordToPdf) {
+   157→      const fileIds = new Set(files.map((f) => f.id))
+   158→      const setter = isMerge ? setMergeOrder : setWordOrder
+   159→      setter((prev) => {
+   160→        const kept = prev.filter((id) => fileIds.has(id))
+   161→        const newIds = files.filter((f) => !kept.includes(f.id)).map((f) => f.id)
+   162→        return [...kept, ...newIds]
+   163→      })
+   164→    }
+   165→  }, [files, isMerge, isWordToPdf])
+   166→
+   167→  // Ordered merge files
+   168→  const mergeFiles: MergeFile[] = isMerge
+   169→    ? mergeOrder
+   170→        .map((id) => files.find((f) => f.id === id))
+   171→        .filter((f): f is QueuedFile => !!f)
+   172→        .map((f) => ({ id: f.id, file: f.file }))
+   173→    : []
+   174→
+   175→  // Ordered word files (Word to PDF)
+   176→  const wordFiles: WordFile[] = isWordToPdf
+   177→    ? wordOrder
+   178→        .map((id) => files.find((f) => f.id === id))
+   179→        .filter((f): f is QueuedFile => !!f)
+   180→        .map((f) => ({ id: f.id, file: f.file }))
+   181→    : []
+   182→
+   183→  // Crop Images: stable identity so the view's emit effect does not loop.
+   184→  const cropImageFiles = React.useMemo(
+   185→    () => files.map((f) => ({ id: f.id, file: f.file })),
+   186→    [files]
+   187→  )
+   188→
+   189→  const canProcess =
+   190→    isHtmlToPdf
+   191→      ? htmlConfig.html.trim().length > 0
+   192→      : cfg.mode === 'files'
+   193→        ? files.length > 0
+   194→        : html.trim().length > 0
+   195→
+   196→  const needsPassword = tool.id === 'protect'
+   197→  const hasPassword = String(options.password ?? '').length > 0
+   198→  const interactiveReady = isInteractive ? interactiveResult !== null : true
+   199→  const runEnabled = canProcess && interactiveReady && (!needsPassword || hasPassword) && !processing.isWorking && !preparing
+   200→
+   201→  const handleProcess = async () => {
+   202→    if (!canProcess || processing.isWorking || preparing) return
+   203→
+   204→    const processor = getProcessor(tool.id)
+   205→    let inputs: { fileName: string; data: ArrayBuffer; size: number }[] = []
+   206→    let mode: 'per-file' | 'single' = 'per-file'
+   207→    let singleLabel: string | undefined
+   208→    let runOptions = options
+   209→    let actualProcessor = processor
+   210→
+   211→    // Tools that need main-thread pre-rendering before run() — show feedback.
+   212→    const needsPrepare = isHtmlToPdf || isWordToPdf || isExcelToPdf
+   213→    if (needsPrepare) {
+   214→      setPreparing(true)
+   215→      setPrepareMsg('Rendering pages…')
+   216→      // Yield so React paints the preparing state before the heavy work starts.
+   217→      await new Promise((r) => setTimeout(r, 0))
+   218→    }
+   219→
+   220→    if (isHtmlToPdf) {
+   221→      // HTML to PDF: render HTML visually in iframe, capture with html2canvas,
+   222→      // send page images to worker. Also send the raw HTML so the worker can
+   223→      // draw invisible selectable text on top of the images.
+   224→      const htmlContent = htmlConfig.html.trim()
+   225→      if (!htmlContent) {
+   226→        toast.error('Please provide HTML content first.')
+   227→        return
+   228→      }
+   229→
+   230→      const SCREEN_W = htmlConfig.screenWidth === 'mobile' ? 375 : htmlConfig.screenWidth === 'tablet' ? 768 : 1280
+   231→      const DIMS: Record<string, [number, number]> = { a4: [595.28, 841.89], letter: [612, 792] }
+   232→      const dims = DIMS[htmlConfig.pageSize] || DIMS.a4
+   233→      const realW = htmlConfig.orientation === 'portrait' ? Math.min(dims[0], dims[1]) : Math.max(dims[0], dims[1])
+   234→      const realH = htmlConfig.orientation === 'portrait' ? Math.max(dims[0], dims[1]) : Math.min(dims[0], dims[1])
+   235→      const SCALE = 2
+   236→
+   237→      // Create isolated iframe and render the HTML
+   238→      const iframe = document.createElement('iframe')
+   239→      iframe.style.cssText = `position:fixed;left:0;top:0;width:${SCREEN_W}px;height:${realH}px;border:none;z-index:-1;opacity:1;`
+   240→      document.body.appendChild(iframe)
+   241→
+   242→      // Wait for iframe to be ready, then write content
+   243→      await new Promise(r => setTimeout(r, 100))
+   244→      const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
+   245→      iframeDoc.open()
+   246→      iframeDoc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+   247→        * { margin:0; padding:0; box-sizing:border-box; }
+   248→        body { background:#fff; padding:${htmlConfig.margin}px; width:${SCREEN_W - htmlConfig.margin * 2}px; }
+   249→      </style></head><body>${htmlContent}</body></html>`)
+   250→      iframeDoc.close()
+   251→
+   252→      // Wait for content to render (fonts, images, layout)
+   253→      await new Promise(r => setTimeout(r, 1500))
+   254→
+   255→      // Load html2canvas into the MAIN window (not iframe) and capture
+   256→      // the iframe's document body by passing it as the target element
+   257→      if (!(window as any).html2canvas) {
+   258→        const s = document.createElement('script')
+   259→        s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
+   260→        document.head.appendChild(s)
+   261→        await new Promise(r => setTimeout(r, 500))
+   262→      }
+   263→      const h2c = (window as any).html2canvas
+   264→
+   265→      const contentH = iframeDoc.body.scrollHeight
+   266→      console.log('[html-to-pdf] Capturing iframe content:', SCREEN_W, 'x', contentH)
+   267→
+   268→      // Use the iframe's document element as the target
+   269→      const canvas = await h2c(iframeDoc.documentElement, {
+   270→        scale: SCALE,
+   271→        useCORS: true,
+   272→        allowTaint: true,
+   273→        backgroundColor: '#ffffff',
+   274→        width: SCREEN_W,
+   275→        height: contentH,
+   276→        windowWidth: SCREEN_W,
+   277→      })
+   278→      console.log('[html-to-pdf] Canvas captured:', canvas.width, 'x', canvas.height)
+   279→
+   280→      document.body.removeChild(iframe)
+   281→
+   282→      // Split into pages (or keep as one long page)
+   283→      const pageHScaled = realH * SCALE
+   284→      const pageImages: { dataUrl: string; w: number; h: number }[] = []
+   285→
+   286→      if (htmlConfig.onePage) {
+   287→        // One long page — use the entire canvas as a single image
+   288→        pageImages.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.92), w: canvas.width, h: canvas.height })
+   289→      } else {
+   290→        let y = 0
+   291→        while (y < canvas.height) {
+   292→          const ph = Math.min(pageHScaled, canvas.height - y)
+   293→          const pc = document.createElement('canvas')
+   294→          pc.width = canvas.width
+   295→          pc.height = ph
+   296→          const pctx = pc.getContext('2d')!
+   297→          pctx.fillStyle = '#ffffff'
+   298→          pctx.fillRect(0, 0, pc.width, pc.height)
+   299→          pctx.drawImage(canvas, 0, y, canvas.width, ph, 0, 0, canvas.width, ph)
+   300→          pageImages.push({ dataUrl: pc.toDataURL('image/jpeg', 0.92), w: canvas.width, h: ph })
+   301→          y += ph
+   302→        }
+   303→      }
+   304→
+   305→      // Send page images to worker — use images-to-pdf processor
+   306→      for (const page of pageImages) {
+   307→        const base64 = page.dataUrl.split(',')[1]
+   308→        const binary = atob(base64)
+   309→        const arr = new Uint8Array(binary.length)
+   310→        for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+   311→        // Verify JPEG magic bytes
+   312→        if (arr[0] !== 0xff || arr[1] !== 0xd8) {
+   313→          throw new Error('Invalid JPEG data from canvas')
+   314→        }
+   315→        inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer.slice(0), size: arr.buffer.byteLength })
+   316→      }
+   317→
+   318→      actualProcessor = 'images-to-pdf'
+   319→      runOptions = {
+   320→        ...options,
+   321→        output: 'single',
+   322→        pageSize: 'fit',
+   323→        outputName: 'html-output',
+   324→      }
+   325→      mode = 'single'
+   326→      singleLabel = 'HTML → PDF output'
+   327→    } else if (cfg.mode === 'text') {
+   328→      const data = new TextEncoder().encode(html).buffer as ArrayBuffer
+   329→      inputs = [{ fileName: 'input.html', data, size: data.byteLength }]
+   330→      mode = 'single'
+   331→      singleLabel = 'HTML → PDF output'
+   332→    } else if (isWordToPdf) {
+   333→      // Word to PDF: pre-render DOCX to page images on the main thread
+   334→      // (using mammoth + html2canvas), then send images to the worker
+   335→      // which wraps them in a PDF. This makes the output look exactly like Word.
+   336→      const orderedFiles = wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
+   337→      let allRendered = true
+   338→      for (const qf of orderedFiles) {
+   339→        try {
+   340→          const pages = await renderDocxToPages(qf.file)
+   341→          if (pages.length === 0) throw new Error('No pages rendered')
+   342→          for (const page of pages) {
+   343→            // Convert data URL to ArrayBuffer
+   344→            const base64 = page.dataUrl.split(',')[1]
+   345→            const binary = atob(base64)
+   346→            const arr = new Uint8Array(binary.length)
+   347→            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+   348→            // Verify the JPEG starts with the correct magic bytes (0xFF 0xD8)
+   349→            if (arr[0] !== 0xff || arr[1] !== 0xd8) {
+   350→              throw new Error('Invalid JPEG data')
+   351→            }
+   352→            inputs.push({
+   353→              fileName: 'page-' + (inputs.length + 1) + '.jpg',
+   354→              data: arr.buffer,
+   355→              size: arr.buffer.byteLength,
+   356→            })
+   357→          }
+   358→        } catch (e) {
+   359→          // Fallback: send raw DOCX to the worker's word-to-pdf processor
+   360→          console.error('DOCX render failed, falling back:', e)
+   361→          allRendered = false
+   362→          const data = await qf.file.arrayBuffer()
+   363→          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+   364→        }
+   365→      }
+   366→      if (allRendered) {
+   367→        // Use the images-to-pdf processor to wrap the page images in a PDF
+   368→        actualProcessor = 'images-to-pdf'
+   369→        const outputName = orderedFiles.length === 1
+   370→          ? orderedFiles[0].file.name.replace(/\.docx?$/i, '')
+   371→          : 'word-converted'
+   372→        runOptions = { ...options, output: 'single', pageSize: 'fit', outputName }
+   373→      } else {
+   374→        // Fallback: use the word-to-pdf processor with the raw DOCX
+   375→        actualProcessor = 'word-to-pdf'
+   376→        runOptions = options
+   377→      }
+   378→      mode = 'single'
+   379→      singleLabel = 'Word → PDF output'
+   380→    } else if (isExcelToPdf) {
+   381→      // Excel to PDF: pre-render XLSX to page images on the main thread
+   382→      // (preserving colors, merges, borders, fonts), then send images to worker
+   383→      for (const qf of files) {
+   384→        try {
+   385→          const pages = await renderXlsxToPages(qf.file)
+   386→          if (pages.length === 0) throw new Error('No pages rendered')
+   387→          for (const page of pages) {
+   388→            const base64 = page.dataUrl.split(',')[1]
+   389→            const binary = atob(base64)
+   390→            const arr = new Uint8Array(binary.length)
+   391→            for (let j = 0; j < binary.length; j++) arr[j] = binary.charCodeAt(j)
+   392→            if (arr[0] !== 0xff || arr[1] !== 0xd8) throw new Error('Invalid JPEG data')
+   393→            inputs.push({ fileName: 'page-' + (inputs.length + 1) + '.jpg', data: arr.buffer, size: arr.buffer.byteLength })
+   394→          }
+   395→          const outputName = qf.file.name.replace(/\.xlsx?$/i, '')
+   396→          actualProcessor = 'images-to-pdf'
+   397→          runOptions = { ...options, output: 'single', pageSize: 'fit', outputName }
+   398→        } catch (e) {
+   399→          console.error('XLSX render failed, falling back:', e)
+   400→          const data = await qf.file.arrayBuffer()
+   401→          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+   402→          actualProcessor = 'excel-to-pdf'
+   403→          runOptions = options
+   404→        }
+   405→      }
+   406→      mode = 'single'
+   407→      singleLabel = 'Excel → PDF output'
+   408→    } else if (isCropImages) {
+   409→      // Crop Images: only files with a drawn crop are processed, per-file.
+   410→      // Crops come from the interactive view in natural pixel coordinates.
+   411→      const cropRes = interactiveResult as CropImagesResult | null
+   412→      const cropMap = cropRes?.crops ?? {}
+   413→      for (const qf of files) {
+   414→        if (!cropMap[qf.file.name]) continue
+   415→        const data = await qf.file.arrayBuffer()
+   416→        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+   417→      }
+   418→      runOptions = { ...options, crops: cropMap }
+   419→    } else {
+   420→      // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
+   421→      const orderedFiles = isMerge
+   422→        ? mergeFiles.map((mf) => files.find((f) => f.id === mf.id)!).filter(Boolean)
+   423→        : isWordToPdf
+   424→          ? wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
+   425→          : files
+   426→      for (const qf of orderedFiles) {
+   427→        const data = await qf.file.arrayBuffer()
+   428→        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+   429→        /* For PDF to Excel: send a second copy of the raw PDF bytes with a
+   430→           special filename so the worker can parse the raw content stream
+   431→           for colors + background rects (pdf.js detaches the first copy). */
+   432→        if (isPdfToExcel) {
+   433→          const rawCopy = await qf.file.arrayBuffer()
+   434→          inputs.push({ fileName: '__raw__' + qf.file.name, data: rawCopy, size: rawCopy.byteLength })
+   435→        }
+   436→      }
+   437→      if (isMerge) {
+   438→        mode = 'single'
+   439→        singleLabel = 'Merged document'
+   440→      } else if (isPdfToExcel) {
+   441→        mode = 'single'
+   442→        singleLabel = 'PDF → Excel output'
+   443→      } else if (isSplit) {
+   444→        // Split uses the SplitView config instead of the generic options
+   445→        runOptions = { ...options, mode: splitConfig.mode, ranges: splitConfig.ranges }
+   446→      } else if (isRotate) {
+   447→        // Rotate uses the RotateView config
+   448→        runOptions = { ...options, angle: rotateConfig.angle }
+   449→      } else if (isImagesToPdf) {
+   450→        // Images to PDF uses the ImagesToPdfView config
+   451→        runOptions = {
+   452→          ...options,
+   453→          pages: imagesConfig.pages,
+   454→          orientation: imagesConfig.orientation,
+   455→          pageSize: imagesConfig.pageSize,
+   456→          margin: imagesConfig.margin,
+   457→          output: imagesConfig.output,
+   458→          selectedIds: imagesConfig.selectedIds,
+   459→        }
+   460→        if (imagesConfig.output === 'single') {
+   461→          mode = 'single'
+   462→          singleLabel = 'Combined image PDF'
+   463→        }
+   464→      } else if (isPdfToImages) {
+   465→        // PDF to Images uses the PdfToImageView config
+   466→        runOptions = {
+   467→          ...options,
+   468→          mode: pdfToImagesConfig.mode,
+   469→          format: pdfToImagesConfig.format,
+   470→          scale: pdfToImagesConfig.scale,
+   471→          selectedPages: pdfToImagesConfig.selectedPages,
+   472→          selectedImages: pdfToImagesConfig.selectedImages.length > 0 ? pdfToImagesConfig.selectedImages : null,
+   473→        }
+   474→      } else if (isInteractive) {
+   475→        mode = 'single'
+   476→        singleLabel = tool.name + ' output'
+   477→        runOptions = { ...options, ...(interactiveResult as object) }
+   478→      }
+   479→    }
+   480→
+   481→    try {
+   482→      setPreparing(false)
+   483→      await processing.run({ processor: actualProcessor, mode, inputs, options: runOptions, singleLabel })
+   484→    } catch (e) {
+   485→      console.error('[handleProcess] run() failed:', e)
+   486→      toast.error('Conversion failed: ' + (e instanceof Error ? e.message : String(e)))
+   487→    } finally {
+   488→      setPreparing(false)
+   489→      setPrepareMsg('')
+   490→    }
+   491→  }
+   492→
+   493→  // Merge file handlers
+   494→  const handleMergeReorder = (reordered: MergeFile[]) => {
+   495→    setMergeOrder(reordered.map((f) => f.id))
+   496→  }
+   497→  const handleMergeRemove = (id: string) => {
+   498→    setFiles((prev) => prev.filter((f) => f.id !== id))
+   499→  }
+   500→  const handleWordReorder = (reordered: WordFile[]) => {
+   501→    setWordOrder(reordered.map((f) => f.id))
+   502→  }
+   503→  const handleWordRemove = (id: string) => {
+   504→    setFiles((prev) => prev.filter((f) => f.id !== id))
+   505→  }
+   506→  const handleAddMore = () => {
+   507→    addMoreInputRef.current?.click()
+   508→  }
+   509→  const handleAddMoreChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+   510→    if (e.target.files?.length) {
+   511→      const newFiles: QueuedFile[] = Array.from(e.target.files).map((file) => ({
+   512→        id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+   513→        file,
+   514→      }))
+   515→      setFiles((prev) => [...prev, ...newFiles])
+   516→    }
+   517→    e.target.value = ''
+   518→  }
+   519→
+   520→  const buttonLabel = preparing
+   521→    ? prepareMsg
+   522→    : processing.isWorking
+   523→      ? 'Processing…'
+   524→      : implemented
+   525→        ? `Run ${tool.name}`
+   526→        : preview
+   527→          ? 'Run engine preview'
+   528→          : `Run ${tool.name}`
+   529→
+   530→  return (
+   531→    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8 lg:py-12">
+   532→      {/* Breadcrumb / back */}
+   533→      <div className="mb-6 flex items-center gap-2 text-sm text-muted-foreground">
+   534→        <button
+   535→          onClick={onBack}
+   536→          className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition-colors hover:bg-secondary hover:text-foreground"
+   537→        >
+   538→          <ArrowLeft className="h-4 w-4" />
+   539→          All tools
+   540→        </button>
+   541→        <ChevronRight className="h-3.5 w-3.5" />
+   542→        <span>{cat?.name}</span>
+   543→        <ChevronRight className="h-3.5 w-3.5" />
+   544→        <span className="text-foreground">{tool.name}</span>
+   545→      </div>
+   546→
+   547→      {/* Header */}
+   548→      <motion.div
+   549→        initial={{ opacity: 0, y: 12 }}
+   550→        animate={{ opacity: 1, y: 0 }}
+   551→        transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+   552→        className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+   553→      >
+   554→        <div className="flex items-center gap-4">
+   555→          <span
+   556→            className={cn(
+   557→              'grid h-14 w-14 shrink-0 place-items-center rounded-2xl ring-1',
+   558→              a.badge,
+   559→              a.ring
+   560→            )}
+   561→          >
+   562→            <Icon className="h-7 w-7" />
+   563→          </span>
+   564→          <div>
+   565→            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+   566→              {tool.name}
+   567→            </h1>
+   568→            <p className="mt-1 max-w-xl text-sm text-muted-foreground">
+   569→              {tool.description}
+   570→            </p>
+   571→          </div>
+   572→        </div>
+   573→        <div className="flex flex-wrap items-center gap-2">
+   574→          {tool.batch && (
+   575→            <Badge variant="secondary" className="rounded-full">
+   576→              <Layers className="mr-1 h-3 w-3" /> Batch
+   577→            </Badge>
+   578→          )}
+   579→          {tool.tag && (
+   580→            <Badge className="rounded-full">{tool.tag}</Badge>
+   581→          )}
+   582→          {preview && (
+   583→            <Badge variant="outline" className="rounded-full border-amber-500/40 text-amber-600 dark:text-amber-400">
+   584→              <Sparkles className="mr-1 h-3 w-3" /> Step {tool.step}
+   585→            </Badge>
+   586→          )}
+   587→        </div>
+   588→      </motion.div>
+   589→
+   590→      <div className="mt-5">
+   591→        <PrivacyBadge />
+   592→      </div>
+   593→
+   594→      {/* Working area */}
+   595→      <motion.div
+   596→        initial={{ opacity: 0, y: 16 }}
+   597→        animate={{ opacity: 1, y: 0 }}
+   598→        transition={{ duration: 0.45, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
+   599→        className="mt-8 rounded-3xl border border-border/70 bg-card p-5 shadow-sm sm:p-7"
+   600→      >
+   601→        {/* Hidden input for "add more files" (merge) */}
+   602→        <input
+   603→          ref={addMoreInputRef}
+   604→          type="file"
+   605→          accept={isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
+   606→          multiple
+   607→          className="hidden"
+   608→          onChange={handleAddMoreChange}
+   609→        />
+   610→
+   611→        {isMerge && files.length > 0 ? (
+   612→          <MergeView
+   613→            files={mergeFiles}
+   614→            onReorder={handleMergeReorder}
+   615→            onRemove={handleMergeRemove}
+   616→            onAddMore={handleAddMore}
+   617→          />
+   618→        ) : isSplit && files.length > 0 ? (
+   619→          <SplitView
+   620→            file={files[0].file}
+   621→            config={splitConfig}
+   622→            onConfigChange={setSplitConfig}
+   623→          />
+   624→        ) : isRotate && files.length > 0 ? (
+   625→          <RotateView
+   626→            file={files[0].file}
+   627→            config={rotateConfig}
+   628→            onConfigChange={setRotateConfig}
+   629→            onRemoveFile={() => setFiles([])}
+   630→          />
+   631→        ) : isImagesToPdf && files.length > 0 ? (
+   632→          <ImagesToPdfView
+   633→            files={files.map((f) => ({ id: f.id, file: f.file }))}
+   634→            config={imagesConfig}
+   635→            onConfigChange={setImagesConfig}
+   636→            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+   637→            onAddMore={handleAddMore}
+   638→          />
+   639→        ) : isPdfToImages && files.length > 0 ? (
+   640→          <PdfToImageView
+   641→            file={files[0].file}
+   642→            config={pdfToImagesConfig}
+   643→            onConfigChange={setPdfToImagesConfig}
+   644→            onRemoveFile={() => setFiles([])}
+   645→          />
+   646→        ) : isWordToPdf && files.length > 0 ? (
+   647→          <WordToPdfView
+   648→            files={wordFiles}
+   649→            onReorder={handleWordReorder}
+   650→            onRemove={handleWordRemove}
+   651→            onAddMore={handleAddMore}
+   652→          />
+   653→        ) : isPdfToExcel && files.length > 0 ? (
+   654→          <PdfToExcelView
+   655→            files={files}
+   656→            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+   657→          />
+   658→        ) : isCropImages && files.length > 0 ? (
+   659→          <CropImagesView
+   660→            files={cropImageFiles}
+   661→            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+   662→            onAddMore={handleAddMore}
+   663→            onChange={setInteractiveResult}
+   664→          />
+   665→        ) : isInteractive && files.length > 0 ? (
+   666→          <InteractiveEditor
+   667→            toolId={tool.id}
+   668→            file={files[0].file}
+   669→            onResultChange={setInteractiveResult}
+   670→            onRemoveFile={() => setFiles([])}
+   671→          />
+   672→        ) : isHtmlToPdf ? (
+   673→          <HtmlToPdfView
+   674→            config={htmlConfig}
+   675→            onConfigChange={setHtmlConfig}
+   676→            onRemoveFile={() => setHtmlConfig({ ...htmlConfig, html: '' })}
+   677→          />
+   678→        ) : cfg.mode === 'files' ? (
+   679→          <Dropzone
+   680→            files={files}
+   681→            onFilesChange={setFiles}
+   682→            accept={cfg.accept}
+   683→            multiple={cfg.multiple}
+   684→            hint={cfg.hint}
+   685→          />
+   686→        ) : (
+   687→          <div className="rounded-3xl border-2 border-dashed border-border bg-background p-6">
+   688→            <label className="mb-2 block text-sm font-medium">
+   689→              Paste your HTML markup
+   690→            </label>
+   691→            <textarea
+   692→              value={html}
+   693→              onChange={(e) => setHtml(e.target.value)}
+   694→              placeholder={'<h1>Hello PDF</h1>\n<p>Render this into a PDF…</p>'}
+   695→              className="min-h-[220px] w-full resize-y rounded-xl border border-border bg-card p-4 font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+   696→            />
+   697→            <p className="mt-2 text-xs text-muted-foreground">
+   698→              HTML rendering arrives in Step {tool.step}.
+   699→            </p>
+   700→          </div>
+   701→        )}
+   702→
+   703→        {/* Tool-specific options */}
+   704→        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isPdfToExcel && (
+   705→          <div className="mt-5">
+   706→            <ToolOptions
+   707→              tool={tool}
+   708→              options={options}
+   709→              onChange={setOptions}
+   710→              disabled={processing.isWorking}
+   711→            />
+   712→          </div>
+   713→        )}
+   714→
+   715→        {/* Page Numbers: real-time first-page preview with the number overlay.
+   716→            Larger size so the user can clearly see how the number looks. */}
+   717→        {isPageNumbers && files.length > 0 && (
+   718→          <div className="mt-6">
+   719→            <PageNumbersPreview
+   720→              file={files[0].file}
+   721→              config={{
+   722→                position: (options.position as string) || 'bottom-center',
+   723→                fontSize: Number(options.fontSize ?? 11),
+   724→                format: (options.format as string) || '{n}',
+   725→                startNumber: Number(options.startNumber ?? 1),
+   726→                margin: Number(options.margin ?? 28),
+   727→              }}
+   728→            />
+   729→          </div>
+   730→        )}
+   731→
+   732→        {/* Action bar */}
+   733→        <div className="mt-6 flex flex-col items-center justify-between gap-3 border-t border-border/60 pt-5 sm:flex-row">
+   734→          <p className="text-xs text-muted-foreground">
+   735→            {processing.isWorking
+   736→              ? 'Running locally — your browser is doing the work.'
+   737→              : cfg.mode === 'files'
+   738→                ? files.length === 0
+   739→                  ? 'Add files to begin.'
+   740→                  : `${files.length} file${files.length > 1 ? 's' : ''} ready.`
+   741→                : html.trim()
+   742→                  ? 'HTML ready.'
+   743→                  : 'Paste HTML to begin.'}
+   744→          </p>
+   745→          <Button
+   746→            size="lg"
+   747→            className="w-full sm:w-auto"
+   748→            disabled={!runEnabled}
+   749→            onClick={handleProcess}
+   750→          >
+   751→            {(processing.isWorking || preparing) ? (
+   752→              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+   753→            ) : (
+   754→              <Wand2 className="mr-2 h-4 w-4" />
+   755→            )}
+   756→            {buttonLabel}
+   757→          </Button>
+   758→        </div>
+   759→
+   760→        {preview && !processing.isWorking && processing.status === 'idle' && (
+   761→          <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-sm">
+   762→            <Cpu className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+   763→            <div>
+   764→              <p className="font-medium text-amber-700 dark:text-amber-300">
+   765→                Engine preview · real {tool.name} logic arrives in Step {tool.step}.
+   766→              </p>
+   767→              <p className="mt-0.5 text-muted-foreground">
+   768→                The full pipeline is live — drop files and hit “Run engine
+   769→                preview” to watch the Web Worker queue, live progress bars and
+   770→                ZIP download in action. Files are processed locally and never
+   771→                uploaded.
+   772→              </p>
+   773→            </div>
+   774→          </div>
+   775→        )}
+   776→      </motion.div>
+   777→
+   778→      {/* Processing panel */}
+   779→      <AnimatePresence>
+   780→        {processing.status !== 'idle' && (
+   781→          <motion.div
+   782→            initial={{ opacity: 0, y: 12 }}
+   783→            animate={{ opacity: 1, y: 0 }}
+   784→            exit={{ opacity: 0, y: -8 }}
+   785→            transition={{ duration: 0.3 }}
+   786→            className="mt-6"
+   787→          >
+   788→            <ProcessingPanel
+   789→              items={processing.items}
+   790→              status={processing.status}
+   791→              overallProgress={processing.overallProgress}
+   792→              concurrency={processing.concurrency}
+   793→              isWorking={processing.isWorking}
+   794→              hasResults={processing.hasResults}
+   795→              onCancel={processing.cancel}
+   796→              onReset={processing.reset}
+   797→              onDownloadOne={processing.downloadOne}
+   798→              onDownloadAll={processing.downloadAll}
+   799→              preview={preview}
+   800→            />
+   801→          </motion.div>
+   802→        )}
+   803→      </AnimatePresence>
+   804→
+   805→      {/* Related tools */}
+   806→      {related.length > 0 && (
+   807→        <div className="mt-12">
+   808→          <h2 className="mb-4 text-lg font-semibold">Related tools</h2>
+   809→          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   810→            {related.map((r) => {
+   811→              const RIcon = r.icon
+   812→              const ra = accentClasses[r.accent]
+   813→              return (
+   814→                <button
+   815→                  key={r.id}
+   816→                  onClick={() => onNavigate(`/${r.id}`)}
+   817→                  className="group flex flex-col items-start gap-2 rounded-xl border border-border/70 bg-card p-4 text-left transition-all hover:-translate-y-0.5 hover:shadow-md"
+   818→                >
+   819→                  <span
+   820→                    className={cn(
+   821→                      'grid h-9 w-9 place-items-center rounded-lg ring-1',
+   822→                      ra.badge,
+   823→                      ra.ring
+   824→                    )}
+   825→                  >
+   826→                    <RIcon className="h-4.5 w-4.5" />
+   827→                  </span>
+   828→                  <span className="text-sm font-medium">{r.name}</span>
+   829→                </button>
+   830→              )
+   831→            })}
+   832→          </div>
+   833→        </div>
+   834→      )}
+   835→    </div>
+   836→  )
+   837→}
+   838→
+   839→function InteractiveEditor({
+   840→  toolId,
+   841→  file,
+   842→  onResultChange,
+   843→  onRemoveFile,
+   844→}: {
+   845→  toolId: string
+   846→  file: File
+   847→  onResultChange: (result: OrganizeResult | CropResult | SignResult | EditResult | null) => void
+   848→  onRemoveFile?: () => void
+   849→}) {
+   850→  if (toolId === 'organize') return <OrganizePdfView file={file} onResultChange={onResultChange} onRemoveFile={onRemoveFile} />
+   851→  if (toolId === 'crop') return <CropPdfView file={file} onResultChange={onResultChange} onRemoveFile={onRemoveFile} />
+   852→  if (toolId === 'sign-annotate') return <SignAnnotateView file={file} onResultChange={onResultChange} />
+   853→  if (toolId === 'edit-text') return <EditTextView file={file} onResultChange={onResultChange} />
+   854→  return null
+   855→}
+   856→
