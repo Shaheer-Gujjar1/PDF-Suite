@@ -52,9 +52,12 @@ interface PxRect {
   height: number
 }
 
+interface PxPoint {
+  x: number
+  y: number
+}
+
 type DragMode =
-  | 'none'
-  | 'creating'
   | 'moving'
   | 'resize-n'
   | 'resize-s'
@@ -65,8 +68,10 @@ type DragMode =
   | 'resize-se'
   | 'resize-sw'
 
-const HANDLE_SIZE = 10
+const HANDLE_SIZE = 12
 const MIN_SIZE = 24
+/** Default selection covers this fraction of the smaller container axis. */
+const DEFAULT_COVER = 0.6
 
 const RATIO_PRESETS: { id: Ratio; label: string }[] = [
   { id: 'free', label: 'Free' },
@@ -86,34 +91,208 @@ function ratioValue(ratio: Ratio, natural: ImageMeta | null): number | null {
   return 16 / 9
 }
 
-function clampRect(rect: PxRect, cw: number, ch: number): PxRect {
-  let { x, y, width, height } = rect
-  x = Math.max(0, x)
-  y = Math.max(0, y)
-  if (x + width > cw) width = cw - x
-  if (y + height > ch) height = ch - y
-  return { x, y, width: Math.max(0, width), height: Math.max(0, height) }
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(v, hi))
 }
 
-/** Enforce a ratio on a rect while keeping it inside the container. */
-function fitRatio(
+function relToPx(rel: RelRect, cw: number, ch: number): PxRect {
+  return { x: rel.x * cw, y: rel.y * ch, width: rel.w * cw, height: rel.h * ch }
+}
+
+/**
+ * Resize by moving ONLY the edges/corner the user grabbed.
+ * Every untouched edge stays exactly where it is. When a ratio is active,
+ * the dominant axis follows the pointer and the derived axis is anchored
+ * on the opposite edge of the grabbed handle.
+ */
+function resizeWithHandles(
+  dm: DragMode,
+  start: PxRect,
+  dx: number,
+  dy: number,
+  cw: number,
+  ch: number,
+  ratio: number | null
+): PxRect {
+  let left = start.x
+  let top = start.y
+  let right = start.x + start.width
+  let bottom = start.y + start.height
+
+  // 1) Move only the grabbed edges.
+  if (dm.includes('w')) left = start.x + dx
+  if (dm.includes('e')) right = start.x + start.width + dx
+  if (dm.includes('n')) top = start.y + dy
+  if (dm.includes('s')) bottom = start.y + start.height + dy
+
+  // 2) Min size on each moved edge, anchored to the opposite edge.
+  if (dm.includes('w') && right - left < MIN_SIZE) left = right - MIN_SIZE
+  if (dm.includes('e') && right - left < MIN_SIZE) right = left + MIN_SIZE
+  if (dm.includes('n') && bottom - top < MIN_SIZE) top = bottom - MIN_SIZE
+  if (dm.includes('s') && bottom - top < MIN_SIZE) bottom = top + MIN_SIZE
+
+  // 3) Keep inside the container without crossing the opposite edge.
+  left = clamp(left, 0, cw)
+  right = clamp(right, 0, cw)
+  top = clamp(top, 0, ch)
+  bottom = clamp(bottom, 0, ch)
+  if (right - left < MIN_SIZE) {
+    if (dm.includes('w')) left = Math.max(0, right - MIN_SIZE)
+    else right = Math.min(cw, left + MIN_SIZE)
+  }
+  if (bottom - top < MIN_SIZE) {
+    if (dm.includes('n')) top = Math.max(0, bottom - MIN_SIZE)
+    else bottom = Math.min(ch, top + MIN_SIZE)
+  }
+
+  // 4) Ratio: dominant axis follows the pointer, other axis derived + anchored.
+  if (ratio) {
+    const heightDominant = dm === 'resize-n' || dm === 'resize-s'
+    let w = right - left
+    let h = bottom - top
+    if (heightDominant) {
+      w = h * ratio
+      if (w > cw) {
+        w = cw
+        h = w / ratio
+      }
+    } else {
+      h = w / ratio
+      if (h > ch) {
+        h = ch
+        w = h * ratio
+      }
+    }
+    if (dm.includes('w')) left = right - w
+    else right = left + w
+    if (dm.includes('n')) top = bottom - h
+    else bottom = top + h
+    left = clamp(left, 0, cw)
+    right = clamp(right, 0, cw)
+    top = clamp(top, 0, ch)
+    bottom = clamp(bottom, 0, ch)
+  }
+
+  const width = right - left
+  const height = bottom - top
+  if (width < 2 || height < 2) return start
+  return { x: left, y: top, width, height }
+}
+
+/** New rect drawn from an anchor point toward the pointer. */
+function createRect(
+  anchor: PxPoint,
+  pos: PxPoint,
+  cw: number,
+  ch: number,
+  ratio: number | null
+): PxRect {
+  const dirX = pos.x >= anchor.x ? 1 : -1
+  const dirY = pos.y >= anchor.y ? 1 : -1
+  const maxW = dirX === 1 ? cw - anchor.x : anchor.x
+  const maxH = dirY === 1 ? ch - anchor.y : anchor.y
+  let w = Math.min(Math.abs(pos.x - anchor.x), maxW)
+  let h = Math.min(Math.abs(pos.y - anchor.y), maxH)
+  if (ratio) {
+    h = w / ratio
+    if (h > maxH) {
+      h = maxH
+      w = h * ratio
+    }
+  }
+  if (w < 2 || h < 2) {
+    return { x: anchor.x, y: anchor.y, width: 0, height: 0 }
+  }
+  return {
+    x: dirX === 1 ? anchor.x : anchor.x - w,
+    y: dirY === 1 ? anchor.y : anchor.y - h,
+    width: w,
+    height: h,
+  }
+}
+
+/** Adjust an existing rect to a ratio, keeping its center. */
+function fitRectToRatio(
   rect: PxRect,
   ratio: number,
   cw: number,
   ch: number
 ): PxRect {
-  const r = clampRect(rect, cw, ch)
-  let width = r.width
-  let height = width / ratio
-  if (height > ch) {
-    height = ch
-    width = height * ratio
+  const cx = rect.x + rect.width / 2
+  const cy = rect.y + rect.height / 2
+  let w = rect.width
+  let h = rect.height
+  if (rect.width / rect.height > ratio) h = w / ratio
+  else w = h * ratio
+  const scale = Math.min(1, cw / w, ch / h)
+  w *= scale
+  h *= scale
+  if (w < MIN_SIZE) {
+    w = MIN_SIZE
+    h = w / ratio
   }
-  if (width > cw) {
-    width = cw
-    height = width / ratio
+  if (h < MIN_SIZE) {
+    h = MIN_SIZE
+    w = h * ratio
   }
-  return clampRect({ x: r.x, y: r.y, width, height }, cw, ch)
+  if (w > cw) {
+    w = cw
+    h = w / ratio
+  }
+  if (h > ch) {
+    h = ch
+    w = h * ratio
+  }
+  return {
+    x: clamp(cx - w / 2, 0, Math.max(0, cw - w)),
+    y: clamp(cy - h / 2, 0, Math.max(0, ch - h)),
+    width: w,
+    height: h,
+  }
+}
+
+/** Centered default selection (used when a preset is clicked with no rect). */
+function defaultRect(ratio: number | null, cw: number, ch: number): PxRect {
+  const r = ratio ?? cw / ch
+  let w = cw * DEFAULT_COVER
+  let h = w / r
+  if (h > ch * DEFAULT_COVER) {
+    h = ch * DEFAULT_COVER
+    w = h * r
+  }
+  return { x: (cw - w) / 2, y: (ch - h) / 2, width: w, height: h }
+}
+
+function hitTest(pos: PxPoint, rect: PxRect): DragMode | null {
+  const { x, y } = pos
+  const left = rect.x
+  const top = rect.y
+  const right = rect.x + rect.width
+  const bottom = rect.y + rect.height
+  const h = HANDLE_SIZE
+
+  if (Math.abs(x - left) < h && Math.abs(y - top) < h) return 'resize-nw'
+  if (Math.abs(x - right) < h && Math.abs(y - top) < h) return 'resize-ne'
+  if (Math.abs(x - left) < h && Math.abs(y - bottom) < h) return 'resize-sw'
+  if (Math.abs(x - right) < h && Math.abs(y - bottom) < h) return 'resize-se'
+  if (Math.abs(y - top) < h && x > left && x < right) return 'resize-n'
+  if (Math.abs(y - bottom) < h && x > left && x < right) return 'resize-s'
+  if (Math.abs(x - left) < h && y > top && y < bottom) return 'resize-w'
+  if (Math.abs(x - right) < h && y > top && y < bottom) return 'resize-e'
+  if (x > left && x < right && y > top && y < bottom) return 'moving'
+  return null
+}
+
+const HANDLE_CURSORS: Record<DragMode, string> = {
+  moving: 'move',
+  'resize-nw': 'nwse-resize',
+  'resize-ne': 'nesw-resize',
+  'resize-sw': 'nesw-resize',
+  'resize-se': 'nwse-resize',
+  'resize-n': 'ns-resize',
+  'resize-s': 'ns-resize',
+  'resize-e': 'ew-resize',
+  'resize-w': 'ew-resize',
 }
 
 function formatBytes(bytes: number): string {
@@ -137,15 +316,24 @@ export function CropImagesView({
   const [containerSize, setContainerSize] = React.useState({ w: 0, h: 0 })
 
   const containerRef = React.useRef<HTMLDivElement>(null)
-  const dragMode = React.useRef<DragMode>('none')
-  const dragStart = React.useRef({ x: 0, y: 0, rect: null as PxRect | null })
+  const drag = React.useRef<{
+    mode: DragMode | 'creating'
+    anchor: PxPoint
+    start: PxRect | null
+    box: { w: number; h: number }
+  } | null>(null)
+
+  // Latest values for pointer handlers without re-binding mid-drag.
+  const relCropsRef = React.useRef(relCrops)
+  relCropsRef.current = relCrops
+  const activeRatioRef = React.useRef<number | null>(null)
+
   const urlsRef = React.useRef<Record<string, string>>({})
 
   /* ---------------- Load image metadata (size + object URL) ------------- */
   React.useEffect(() => {
     let cancelled = false
 
-    // Prune metadata + revoke URLs for removed files.
     setMeta((prev) => {
       const next: Record<string, ImageMeta> = {}
       for (const f of files) {
@@ -160,7 +348,6 @@ export function CropImagesView({
       return next
     })
 
-    // Load metadata for new files.
     const missing = files.filter((f) => !urlsRef.current[f.id])
     for (const f of missing) {
       const url = URL.createObjectURL(f.file)
@@ -207,28 +394,33 @@ export function CropImagesView({
       return
     }
     if (!activeId || !files.some((f) => f.id === activeId)) {
-      const firstWithoutCrop =
-        files.find((f) => !relCrops[f.id]) ?? files[0]
+      const firstWithoutCrop = files.find((f) => !relCrops[f.id]) ?? files[0]
       setActiveId(firstWithoutCrop.id)
     }
   }, [files, activeId, relCrops])
 
-  /* ---------------- Track container size --------------------------------- */
-  React.useEffect(() => {
-    if (!containerRef.current) return
-    const update = () => {
-      if (containerRef.current) {
-        setContainerSize({
-          w: containerRef.current.clientWidth,
-          h: containerRef.current.clientHeight,
-        })
-      }
-    }
-    update()
-    const ro = new ResizeObserver(update)
-    ro.observe(containerRef.current)
+  /* ---------------- Container measurement -------------------------------- */
+  const updateSize = React.useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    setContainerSize((prev) => {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      if (w === prev.w && h === prev.h) return prev
+      return { w, h }
+    })
+  }, [])
+
+  // Measure synchronously before paint so the overlay is never stale after
+  // switching images (this was the source of stretched/contracted rects).
+  React.useLayoutEffect(() => {
+    updateSize()
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(updateSize)
+    ro.observe(el)
     return () => ro.disconnect()
-  }, [activeId, meta])
+  }, [activeId, activeMeta, updateSize])
 
   /* ---------------- Emit result whenever crops change -------------------- */
   const croppedCount = files.filter((f) => relCrops[f.id]).length
@@ -255,210 +447,145 @@ export function CropImagesView({
   const activeMeta = activeId ? meta[activeId] ?? null : null
   const activeRel = activeId ? relCrops[activeId] ?? null : null
   const activeRatio = ratioValue(ratio, activeMeta)
+  activeRatioRef.current = activeRatio
 
-  const setPxRect = React.useCallback(
-    (rect: PxRect | null) => {
-      if (!activeId || !containerSize.w || !containerSize.h) return
+  const setRelFromPx = React.useCallback(
+    (rect: PxRect | null, box: { w: number; h: number }) => {
+      if (!activeId) return
       setRelCrops((prev) => {
         const next = { ...prev }
         if (!rect || rect.width <= 0 || rect.height <= 0) {
           delete next[activeId]
         } else {
           next[activeId] = {
-            x: rect.x / containerSize.w,
-            y: rect.y / containerSize.h,
-            w: rect.width / containerSize.w,
-            h: rect.height / containerSize.h,
+            x: rect.x / box.w,
+            y: rect.y / box.h,
+            w: rect.width / box.w,
+            h: rect.height / box.h,
           }
         }
         return next
       })
     },
-    [activeId, containerSize]
+    [activeId]
   )
 
   const activePx: PxRect | null =
     activeRel && containerSize.w > 0 && containerSize.h > 0
-      ? {
-          x: activeRel.x * containerSize.w,
-          y: activeRel.y * containerSize.h,
-          width: activeRel.w * containerSize.w,
-          height: activeRel.h * containerSize.h,
-        }
+      ? relToPx(activeRel, containerSize.w, containerSize.h)
       : null
 
-  /* ---------------- Mouse interaction ------------------------------------ */
-  const getMousePos = (e: React.MouseEvent) => {
-    if (!containerRef.current) return { x: 0, y: 0 }
-    const rect = containerRef.current.getBoundingClientRect()
+  /* ---------------- Pointer interaction ----------------------------------- */
+  const posFromEvent = (e: React.PointerEvent): PxPoint => {
+    const el = containerRef.current
+    if (!el) return { x: 0, y: 0 }
+    const r = el.getBoundingClientRect()
     return {
-      x: Math.max(0, Math.min(e.clientX - rect.left, rect.width)),
-      y: Math.max(0, Math.min(e.clientY - rect.top, rect.height)),
+      x: clamp(e.clientX - r.left, 0, r.width),
+      y: clamp(e.clientY - r.top, 0, r.height),
     }
   }
 
-  const hitTest = (pos: { x: number; y: number }, rect: PxRect): DragMode => {
-    if (!rect || rect.width === 0) return 'none'
-    const { x, y } = pos
-    const left = rect.x
-    const top = rect.y
-    const right = rect.x + rect.width
-    const bottom = rect.y + rect.height
-    const h = HANDLE_SIZE
-
-    if (Math.abs(x - left) < h && Math.abs(y - top) < h) return 'resize-nw'
-    if (Math.abs(x - right) < h && Math.abs(y - top) < h) return 'resize-ne'
-    if (Math.abs(x - left) < h && Math.abs(y - bottom) < h) return 'resize-sw'
-    if (Math.abs(x - right) < h && Math.abs(y - bottom) < h) return 'resize-se'
-    if (Math.abs(y - top) < h && x > left && x < right) return 'resize-n'
-    if (Math.abs(y - bottom) < h && x > left && x < right) return 'resize-s'
-    if (Math.abs(x - left) < h && y > top && y < bottom) return 'resize-w'
-    if (Math.abs(x - right) < h && y > top && y < bottom) return 'resize-e'
-    if (x > left && x < right && y > top && y < bottom) return 'moving'
-    return 'none'
-  }
-
-  const applyDragRatio = (
-    dm: DragMode,
-    rect: PxRect,
-    startRect: PxRect
-  ): PxRect => {
-    if (!activeRatio || containerSize.w === 0 || containerSize.h === 0)
-      return rect
-    const ratio = activeRatio
-    const r = { ...rect }
-    const isHeightDominant = dm === 'resize-n' || dm === 'resize-s'
-    if (isHeightDominant) {
-      const width = r.height * ratio
-      if (dm === 'resize-n' || dm.includes('w')) {
-        r.x = startRect.x + startRect.width - width
-      }
-      r.width = width
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (!activeMeta || e.button !== 0) return
+    const el = containerRef.current
+    if (!el) return
+    const box = { w: el.clientWidth, h: el.clientHeight }
+    if (!box.w || !box.h) return
+    // Capture the pointer: drags keep working even when the cursor leaves
+    // the image, and the up-event can never be missed.
+    try {
+      el.setPointerCapture(e.pointerId)
+    } catch {
+      // ignore — capture is best-effort
+    }
+    const pos = posFromEvent(e)
+    const px = activeRel ? relToPx(activeRel, box.w, box.h) : null
+    const hit = px ? hitTest(pos, px) : null
+    if (hit && px) {
+      drag.current = { mode: hit, anchor: pos, start: { ...px }, box }
     } else {
-      const height = r.width / ratio
-      if (dm === 'resize-n' || dm.includes('n')) {
-        r.y = startRect.y + startRect.height - height
-      }
-      r.height = height
+      drag.current = { mode: 'creating', anchor: pos, start: null, box }
+      setRelFromPx(
+        { x: pos.x, y: pos.y, width: 0, height: 0 },
+        box
+      )
     }
-    return r
   }
 
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!activeMeta) return
-    const pos = getMousePos(e)
-    if (activePx) {
-      const hit = hitTest(pos, activePx)
-      if (hit !== 'none') {
-        dragMode.current = hit
-        dragStart.current = { x: pos.x, y: pos.y, rect: { ...activePx } }
-        return
-      }
-    }
-    dragMode.current = 'creating'
-    dragStart.current = { x: pos.x, y: pos.y, rect: null }
-    setPxRect({ x: pos.x, y: pos.y, width: 0, height: 0 })
-  }
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (dragMode.current === 'none') return
-    const pos = getMousePos(e)
-    const start = dragStart.current
-    const { w: cw, h: ch } = containerSize
-    if (cw === 0 || ch === 0) return
-
-    if (dragMode.current === 'creating') {
-      const dirX = pos.x >= start.x ? 1 : -1
-      const dirY = pos.y >= start.y ? 1 : -1
-      let width = Math.abs(pos.x - start.x)
-      let height = Math.abs(pos.y - start.y)
-      const maxW = dirX === 1 ? cw - start.x : start.x
-      const maxH = dirY === 1 ? ch - start.y : start.y
-      if (activeRatio) {
-        height = width / activeRatio
-        if (height > maxH) {
-          height = maxH
-          width = height * activeRatio
-        }
-        if (width > maxW) {
-          width = maxW
-          height = width / activeRatio
-        }
-      } else {
-        width = Math.min(width, maxW)
-        height = Math.min(height, maxH)
-      }
-      const x = dirX === 1 ? start.x : start.x - width
-      const y = dirY === 1 ? start.y : start.y - height
-      setPxRect(clampRect({ x, y, width, height }, cw, ch))
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = drag.current
+    if (!d) return
+    const pos = posFromEvent(e)
+    const { w: cw, h: ch } = d.box
+    if (d.mode === 'creating') {
+      setRelFromPx(
+        createRect(d.anchor, pos, cw, ch, activeRatioRef.current),
+        d.box
+      )
       return
     }
-
-    if (dragMode.current === 'moving' && start.rect) {
-      const dx = pos.x - start.x
-      const dy = pos.y - start.y
-      const newX = Math.max(
-        0,
-        Math.min(start.rect.x + dx, cw - start.rect.width)
-      )
-      const newY = Math.max(
-        0,
-        Math.min(start.rect.y + dy, ch - start.rect.height)
-      )
-      setPxRect({ ...start.rect, x: newX, y: newY })
+    if (!d.start) return
+    const dx = pos.x - d.anchor.x
+    const dy = pos.y - d.anchor.y
+    if (d.mode === 'moving') {
+      const x = clamp(d.start.x + dx, 0, Math.max(0, cw - d.start.width))
+      const y = clamp(d.start.y + dy, 0, Math.max(0, ch - d.start.height))
+      setRelFromPx({ ...d.start, x, y }, d.box)
       return
     }
+    setRelFromPx(
+      resizeWithHandles(d.mode, d.start, dx, dy, cw, ch, activeRatioRef.current),
+      d.box
+    )
+  }
 
-    if (start.rect) {
-      const dm = dragMode.current
-      const dx = pos.x - start.x
-      const dy = pos.y - start.y
-      let { x, y, width, height } = start.rect
-      if (dm.includes('w')) {
-        x = start.rect.x + dx
-        width = start.rect.width - dx
+  const endDrag = () => {
+    const d = drag.current
+    drag.current = null
+    if (d && d.mode === 'creating') {
+      // Discard accidental tiny selections.
+      const rel = relCropsRef.current[activeId ?? '']
+      if (rel && d.box.w > 0 && d.box.h > 0) {
+        const wPx = rel.w * d.box.w
+        const hPx = rel.h * d.box.h
+        if (wPx < MIN_SIZE || hPx < MIN_SIZE) {
+          setRelFromPx(null, d.box)
+        }
       }
-      if (dm.includes('e')) width = start.rect.width + dx
-      if (dm.includes('n')) {
-        y = start.rect.y + dy
-        height = start.rect.height - dy
-      }
-      if (dm.includes('s')) height = start.rect.height + dy
-      if (width < MIN_SIZE) {
-        if (dm.includes('w')) x = start.rect.x + start.rect.width - MIN_SIZE
-        width = MIN_SIZE
-      }
-      if (height < MIN_SIZE) {
-        if (dm.includes('n')) y = start.rect.y + start.rect.height - MIN_SIZE
-        height = MIN_SIZE
-      }
-      let rect = clampRect({ x, y, width, height }, cw, ch)
-      rect = applyDragRatio(dm, rect, start.rect)
-      if (rect.width < MIN_SIZE || rect.height < MIN_SIZE) {
-        rect = start.rect
-      }
-      setPxRect(rect)
     }
   }
 
-  const handleMouseUp = () => {
-    if (dragMode.current === 'creating' && activePx) {
-      if (activePx.width < MIN_SIZE || activePx.height < MIN_SIZE) {
-        setPxRect(null)
-      }
+  /* ---------------- Toolbar actions --------------------------------------- */
+  const applyRatioPreset = (r: Ratio) => {
+    setRatio(r)
+    const el = containerRef.current
+    if (!el || !activeMeta) return
+    const cw = el.clientWidth
+    const ch = el.clientHeight
+    if (!cw || !ch) return
+    const box = { w: cw, h: ch }
+    if (r === 'free') {
+      // Free with nothing selected: show a default centered rect.
+      if (!activeRel) setRelFromPx(defaultRect(null, cw, ch), box)
+      return
     }
-    dragMode.current = 'none'
+    const ratio = ratioValue(r, activeMeta)
+    if (!ratio) return
+    if (activeRel) {
+      // Keep the user's placement: adjust the existing rect to the ratio.
+      setRelFromPx(fitRectToRatio(relToPx(activeRel, cw, ch), ratio, cw, ch), box)
+    } else {
+      // No rect yet: immediately show one at the chosen ratio.
+      setRelFromPx(defaultRect(ratio, cw, ch), box)
+    }
   }
 
-  /* ---------------- Toolbar actions -------------------------------------- */
   const selectFull = () => {
-    if (!activeId || containerSize.w === 0) return
-    setPxRect({
-      x: 0,
-      y: 0,
-      width: containerSize.w,
-      height: containerSize.h,
-    })
+    const el = containerRef.current
+    if (!el || !activeId) return
+    const box = { w: el.clientWidth, h: el.clientHeight }
+    setRelFromPx({ x: 0, y: 0, width: box.w, height: box.h }, box)
   }
 
   const resetCrop = () => {
@@ -490,7 +617,7 @@ export function CropImagesView({
     onRemove(id)
   }
 
-  /* ---------------- Render ------------------------------------------------ */
+  /* ---------------- Render ------------------------------------------------- */
   const loadingMeta = files.some((f) => !meta[f.id])
 
   if (files.length === 0) return null
@@ -528,7 +655,7 @@ export function CropImagesView({
                 <button
                   key={r.id}
                   type="button"
-                  onClick={() => setRatio(r.id)}
+                  onClick={() => applyRatioPreset(r.id)}
                   className={cn(
                     'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
                     ratio === r.id
@@ -545,7 +672,6 @@ export function CropImagesView({
                 size="sm"
                 variant="outline"
                 onClick={selectFull}
-                disabled={!activeMeta}
                 className="gap-1.5"
               >
                 <Square className="h-3.5 w-3.5" /> Full area
@@ -576,11 +702,11 @@ export function CropImagesView({
             <div
               ref={containerRef}
               className="relative cursor-crosshair select-none overflow-hidden rounded-lg border-2 border-border bg-muted shadow-sm"
-              style={{ maxWidth: '100%', lineHeight: 0 }}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={handleMouseUp}
-              onMouseLeave={handleMouseUp}
+              style={{ maxWidth: '100%', lineHeight: 0, touchAction: 'none' }}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
             >
               {/* Active image */}
               <img
@@ -599,7 +725,7 @@ export function CropImagesView({
                       clipPath: `polygon(0 0, 0 100%, ${activePx.x}px 100%, ${activePx.x}px ${activePx.y}px, ${activePx.x + activePx.width}px ${activePx.y}px, ${activePx.x + activePx.width}px ${activePx.y + activePx.height}px, ${activePx.x}px ${activePx.y + activePx.height}px, ${activePx.x}px 100%, 100% 100%, 100% 0)`,
                     }}
                   />
-                  {/* Thirds guide */}
+                  {/* Selection border + thirds guide + handles */}
                   <div
                     className="pointer-events-none absolute border-2 border-primary"
                     style={{
@@ -639,17 +765,8 @@ export function CropImagesView({
                           handleStyle.transform = 'translateY(-50%)'
                           handleStyle.height = HANDLE_SIZE * 2
                         }
-                        const cursors: Record<string, string> = {
-                          nw: 'nwse-resize',
-                          ne: 'nesw-resize',
-                          sw: 'nesw-resize',
-                          se: 'nwse-resize',
-                          n: 'ns-resize',
-                          s: 'ns-resize',
-                          e: 'ew-resize',
-                          w: 'ew-resize',
-                        }
-                        handleStyle.cursor = cursors[h]
+                        const dm = ('resize-' + h) as DragMode
+                        handleStyle.cursor = HANDLE_CURSORS[dm]
                         return <div key={h} style={handleStyle} />
                       }
                     )}
@@ -669,27 +786,25 @@ export function CropImagesView({
               ({activeMeta.width}×{activeMeta.height})
             </p>
             {activePx && activeMeta && containerSize.w > 0 && (
-              <div className="flex gap-2 text-xs text-muted-foreground">
-                <span>
-                  Crop:{' '}
-                  <strong className="text-foreground">
-                    {Math.max(
-                      1,
-                      Math.round(
-                        (activePx.width / containerSize.w) * activeMeta.width
-                      )
-                    )}
-                    ×
-                    {Math.max(
-                      1,
-                      Math.round(
-                        (activePx.height / containerSize.h) * activeMeta.height
-                      )
-                    )}
-                  </strong>{' '}
-                  px
-                </span>
-              </div>
+              <p className="text-xs text-muted-foreground">
+                Crop:{' '}
+                <strong className="text-foreground">
+                  {Math.max(
+                    1,
+                    Math.round(
+                      (activePx.width / containerSize.w) * activeMeta.width
+                    )
+                  )}
+                  ×
+                  {Math.max(
+                    1,
+                    Math.round(
+                      (activePx.height / containerSize.h) * activeMeta.height
+                    )
+                  )}
+                </strong>{' '}
+                px
+              </p>
             )}
           </div>
         </>

@@ -562,3 +562,22 @@ Work Log:
 Stage Summary:
 - ToolForge now positioned as a general all-tools platform; PDF is presented as one capability among future categories
 - Next structural step when adding new tools: extend ToolCategory union + categories array in src/lib/tools.ts, register tools, add tool view components
+
+---
+Task ID: 4
+Agent: Super Z (main agent)
+Task: Fix Crop Images visual editor bugs (handle anchoring, free-mode stretching, ratio presets not showing rect)
+
+Work Log:
+- Rewrote interaction layer of src/components/tools/crop-images-view.tsx:
+  1. Edge/corner anchoring: new resizeWithHandles() moves ONLY the grabbed edges; opposite edges stay exactly anchored; middle n/s handles resize height-only, e/w width-only; min-size + container clamps respect anchors
+  2. Pointer capture: switched mouse events to Pointer Events with setPointerCapture — drags continue smoothly outside the image and the up-event can never be missed (no more stuck/erratic drags)
+  3. Fixed stretching/contracting: container measured synchronously via useLayoutEffect before paint (was stale after switching images); fresh clientWidth/Height measured at every pointerdown; drag math uses the box captured at drag start (immune to mid-drag reflow)
+  4. Ratio presets (Free/Original/1:1/4:3/16:9) now immediately show a selection rectangle: creates a centered default rect (60% cover) when none exists; adjusts the existing rect to the ratio keeping its center; Free with no rect also shows a default rect
+  5. Helper geometry functions: createRect (ratio-aware draw from anchor), fitRectToRatio (center-keeping fit), defaultRect, resizeWithHandles; removed old buggy applyDragRatio/fitRatio
+  6. touchAction:'none' on the editor so touch drags don't scroll the page
+- eslint.config.mjs: added scripts/** and .zscripts/** to ignores (dev utility scripts were tripping no-require-imports)
+- Per user request: lint-only verification (no browser test marathon). bun run lint clean; dev server 200
+
+Stage Summary:
+- Crop editor interaction is now deterministic: anchored handles, stable rects across image switches, instant visual feedback from ratio presets
