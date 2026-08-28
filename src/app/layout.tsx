@@ -15,26 +15,31 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ToolForge — All-in-One PDF Tools, 100% Private",
+  title: "ToolForge — Every Tool You Need, 100% Private",
   description:
-    "A premium, 100% client-side PDF toolkit. Merge, split, compress, convert, edit, sign and secure PDFs — all in your browser. Free batch processing. No uploads, ever.",
+    "A premium, 100% private online toolbox for PDFs, images, documents and more. Convert, merge, compress, edit and secure your files — all in your browser. Free batch processing. No uploads, ever.",
   keywords: [
+    "free online tools",
+    "file tools",
     "PDF tools",
     "merge PDF",
     "split PDF",
     "compress PDF",
     "PDF converter",
-    "private PDF",
-    "batch PDF",
+    "image converter",
+    "document tools",
+    "private tools",
+    "browser tools",
+    "batch processing",
   ],
   authors: [{ name: "ToolForge" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "ToolForge — All-in-One PDF Tools, 100% Private",
+    title: "ToolForge — Every Tool You Need, 100% Private",
     description:
-      "Every PDF tool you need, in one place. 100% client-side. Free batch processing.",
+      "Every tool you need, in one place. PDFs, images, documents and more — 100% private, in your browser. Free batch processing.",
     siteName: "ToolForge",
     type: "website",
   },

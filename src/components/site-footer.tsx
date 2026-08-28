@@ -23,8 +23,9 @@ export function SiteFooter({ onNavigate }: SiteFooterProps) {
               </span>
             </div>
             <p className="max-w-xs text-sm text-muted-foreground">
-              The premium, all-in-one PDF toolkit that runs entirely in your
-              browser. No uploads, no servers, no compromises.
+              The premium, all-in-one toolbox for your files — PDFs, images,
+              documents and more. Runs entirely in your browser. No uploads,
+              no servers, no compromises.
             </p>
             <div className="flex flex-wrap gap-2">
               <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/20">

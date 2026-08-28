@@ -58,11 +58,12 @@ export function HomeView({ onNavigate }: HomeViewProps) {
             <PrivacyBadge size="sm" />
           </div>
           <h1 className="text-balance text-3xl font-semibold tracking-tight sm:text-4xl md:text-5xl">
-            Every PDF tool you need
+            Every tool you need, in one place
           </h1>
           <p className="mx-auto mt-3 max-w-xl text-pretty text-sm text-muted-foreground sm:text-base">
-            Merge, split, compress, convert, edit and secure — all in your
-            browser. Free, private, with unlimited batch processing.
+            Convert, merge, compress, edit and secure your files — PDFs,
+            images, documents and more. All in your browser. Free, private,
+            with unlimited batch processing.
           </p>
         </motion.div>
       </div>

@@ -543,3 +543,22 @@ Work Log:
 Stage Summary:
 - App fully rebranded to ToolForge; UI, SEO metadata, output filenames, and generated document metadata all consistent
 - Note: GitHub remote still points to PDF-Suite repo name (renaming requires GitHub-side repo settings action by owner)
+
+---
+Task ID: 3
+Agent: Super Z (main agent)
+Task: Reposition marketing copy from PDF-only to general all-tools platform (user plans to add many non-PDF tools)
+
+Work Log:
+- src/app/layout.tsx: title → "ToolForge — Every Tool You Need, 100% Private"; meta description generalized to "online toolbox for PDFs, images, documents and more"; keywords expanded with general terms (free online tools, file tools, image converter, browser tools) while keeping PDF keywords; openGraph title/description generalized
+- src/components/home-view.tsx: hero h1 → "Every tool you need, in one place"; hero subtitle → "Convert, merge, compress, edit and secure your files — PDFs, images, documents and more..."
+- src/components/site-footer.tsx: footer blurb → "The premium, all-in-one toolbox for your files — PDFs, images, documents and more..."
+- Kept generic copy as-is: logo tagline "All-in-One · Private", privacy badge, trust badges (WASM powered, Free batch)
+- Kept PDF keyword in SEO keywords intentionally (PDF tools still offered)
+- Category system in src/lib/tools.ts untouched (functional nav tied to current PDF tool registry — will need restructuring when non-PDF tool categories are added)
+- Verified: rg shows no PDF-centric marketing phrases left in src/; bun run lint clean
+- Browser-verified: title, h1, hero subtitle, footer all render new copy; no console/page errors
+
+Stage Summary:
+- ToolForge now positioned as a general all-tools platform; PDF is presented as one capability among future categories
+- Next structural step when adding new tools: extend ToolCategory union + categories array in src/lib/tools.ts, register tools, add tool view components
