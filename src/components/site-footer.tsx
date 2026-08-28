@@ -16,10 +16,10 @@ export function SiteFooter({ onNavigate }: SiteFooterProps) {
           <div className="space-y-4">
             <div className="flex items-center gap-2">
               <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-rose-500 to-pink-600 text-white shadow-lg shadow-rose-500/30">
-                <span className="text-sm font-bold">P</span>
+                <span className="text-sm font-bold">T</span>
               </span>
               <span className="text-base font-semibold tracking-tight">
-                PDF Suite
+                ToolForge
               </span>
             </div>
             <p className="max-w-xs text-sm text-muted-foreground">
@@ -57,7 +57,7 @@ export function SiteFooter({ onNavigate }: SiteFooterProps) {
         </div>
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-border/60 pt-6 text-sm text-muted-foreground sm:flex-row">
-          <p>© {year} PDF Suite. Built for privacy.</p>
+          <p>© {year} ToolForge. Built for privacy.</p>
           <p className="inline-flex items-center gap-1.5">
             Made with <Heart className="h-3.5 w-3.5 fill-rose-500 text-rose-500" /> using React, Tailwind &amp; WebAssembly
           </p>

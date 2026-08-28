@@ -522,3 +522,24 @@ Stage Summary:
 - PDF-Suite (Next.js 16 + TS + Tailwind 4 + shadcn/ui + Prisma) is running at localhost:3000
 - Project ready for enhancement work; git remote origin points to user's GitHub repo
 - Key architecture notes: client-side PDF processing via pdf-lib in worker pool (src/lib/processing/), hash-based routing (src/lib/use-hash-route.ts), tools registry (src/lib/tools.ts), single page route src/app/page.tsx
+
+---
+Task ID: 2
+Agent: Super Z (main agent)
+Task: Rename whole app from "PDF Suite" to "ToolForge"
+
+Work Log:
+- Grepped codebase (case-insensitive "pdf.?suite") to locate all brand occurrences
+- src/app/layout.tsx: metadata title (x2), authors name, openGraph title, siteName → ToolForge
+- src/components/logo.tsx: header brand text → ToolForge
+- src/components/site-footer.tsx: footer brand text, logo letter "P"→"T", copyright line → ToolForge
+- src/lib/zip.ts + src/hooks/use-processing.ts: default batch ZIP name pdf-suite-output.zip → toolforge-output.zip
+- src/lib/processing/worker-source.ts: XLSX docProps Application + dc:creator metadata → ToolForge
+- package.json: name field → "toolforge"
+- Left worklog.md history entries untouched (historical record)
+- Verified: rg finds zero remaining occurrences; bun run lint clean
+- Browser-verified: page title, header logo, footer copyright all show ToolForge; no console/page errors
+
+Stage Summary:
+- App fully rebranded to ToolForge; UI, SEO metadata, output filenames, and generated document metadata all consistent
+- Note: GitHub remote still points to PDF-Suite repo name (renaming requires GitHub-side repo settings action by owner)

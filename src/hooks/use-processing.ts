@@ -191,7 +191,7 @@ export function useProcessing(concurrency?: number): UseProcessingReturn {
       return
     }
     const name =
-      all.length === 1 ? undefined : 'pdf-suite-output.zip'
+      all.length === 1 ? undefined : 'toolforge-output.zip'
     await downloadZip(all, name)
     toast.success(
       `Downloaded ${all.length} file${all.length > 1 ? 's' : ''}${

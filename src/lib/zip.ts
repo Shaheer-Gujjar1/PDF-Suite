@@ -47,7 +47,7 @@ function uniqueNames(files: OutputFile[]): OutputFile[] {
 
 export async function createZip(
   files: OutputFile[],
-  zipName = 'pdf-suite-output.zip'
+  zipName = 'toolforge-output.zip'
 ): Promise<{ blob: Blob; name: string }> {
   const zip = new JSZip()
   for (const f of uniqueNames(files)) {

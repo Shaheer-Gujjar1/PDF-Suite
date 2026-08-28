@@ -37,7 +37,7 @@ export function Logo({ className }: { className?: string }) {
       </span>
       <span className="flex flex-col leading-none">
         <span className="text-[15px] font-semibold tracking-tight">
-          PDF Suite
+          ToolForge
         </span>
         <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
           All-in-One · Private
