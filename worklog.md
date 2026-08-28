@@ -602,3 +602,27 @@ Work Log:
 Stage Summary:
 - The width-change-on-horizontal-swipe bug is fixed at its root (substring matching on the drag-mode string); all four mid-edge handles now move ONLY their own edge in free mode
 - Ratio-locked cropping can no longer produce surprise width snaps from Full area / Copy to all / drag start
+
+---
+Task ID: 6
+Agent: Super Z (main agent)
+Task: Fix Crop Images mid-edge handles — dragging left/right or top/bottom handles changed BOTH width and height (user report; user asked to mirror iloveimg.com)
+
+Work Log:
+- Tested iloveimg.com/crop-image live (agent-browser + synthetic pointer drags on its Cropper.js box): iloveimg's crop tool has NO ratio lock — mid-edge handles are strictly single-axis (e +60 → dW=60/dH=0; vertical swipe on e → no change; horizontal swipe on n → no change); our Free mode already matched exactly
+- Reproduced the user's bug locally in ratio-locked modes; three defects found in resizeWithHandles()' ratio branch:
+  1. e/w mid drags re-centered the height around the selection center → both dimensions changed on a side drag (exact user complaint)
+  2. n/s mid drags applied the derived width via re-centering; when the derived width overflowed the container it snapped to full width → width jumped on a top/bottom drag
+  3. Clamps ran after ratio math without re-deriving → off-ratio rects (e.g. 1:1 drag produced 405.6×346; 16:9 n-drag produced 519×318.97)
+- Fixed resizeWithHandles(): mid-edge handles (n/s/e/w) are now STRICTLY single-axis in every mode — dragged edge follows the pointer, opposite edge never moves, perpendicular dimension untouched, ratio never consulted. A locked ratio is enforced on CORNER drags only (width leads, height derived, opposite corner anchored) with the derived size capped by the room available FROM the anchor edges (maxW = grabW ? right : cw-left; maxH = grabN ? bottom : ch-top) so container clamps can never break the ratio
+- Pointer-down ratio snap now applies to corner hits only (mid handles must not snap: it would undo the user's one-axis adjustment at grab time)
+- Hardened hitTest(): corner zones shrink to min(HANDLE_SIZE, box/2) on small boxes so a short/narrow box always keeps usable mid-edge zones; w/e handles now accept grabs a few px OUTSIDE the edge line and at flush edges (x=0/x=cw previously fell through to 'creating' and destroyed the selection)
+- Fixed test helper false-match: scoped getRect selector to the editor container (the active batch thumbnail also carries border-2 border-primary)
+- Verified with 17 synthetic drag tests in browser: FREE e/w/n/s single-axis exact (incl. cross-axis no-ops, opposite-edge anchoring, flush-edge), 1:1 e/w/n/s single-axis, 1:1 SE corner enforces 346×346 anchored NW, 16:9 corner keeps 490.7×276, short 300×40 box middle-edge grab stays single-axis, flush x=0 grab resizes instead of re-creating, corners in Free change both axes, Original + e-drag width-only, move + ratio-aware draw intact
+- End-to-end regression: drew rect → Run Crop Images → downloaded test-photo-cropped.jpg → 462×308 px, exactly matching the 200×133.33 container selection at 2.312 scale
+- bun run lint clean; removed temporary public/test-photo.jpg
+
+Stage Summary:
+- Mid-edge handles now behave like iloveimg/Cropper.js in ALL modes: one handle = one axis, opposite side fixed
+- Ratio presets now govern corners, preset clicks, drawing, Full area and Copy to all — not mid-edge drags
+- No code path can produce an off-ratio rect from a corner drag, and no side drag can move the opposite edge or the perpendicular dimension

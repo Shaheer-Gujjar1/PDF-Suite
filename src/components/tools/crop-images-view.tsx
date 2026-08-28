@@ -101,11 +101,20 @@ function relToPx(rel: RelRect, cw: number, ch: number): PxRect {
 
 /**
  * Resize by moving ONLY the edges/corner the user grabbed.
- * Every untouched edge stays exactly where it is. When a ratio is active,
- * the dominant axis follows the pointer and the derived axis is computed
- * from it: mid-edge handles (n/s/e/w) scale symmetrically around the
- * selection center (a centered handle must not run one edge away), while
- * corners anchor the opposite corner.
+ *
+ * Mid-edge handles (n/s/e/w) are STRICTLY single-axis in every mode — the
+ * dragged edge follows the pointer, the opposite edge never moves and the
+ * perpendicular dimension is untouched: dragging e/w changes width only,
+ * dragging n/s changes height only (iloveimg/Cropper.js behavior). They
+ * never consult the ratio: re-centering or re-deriving the other axis made
+ * both dimensions change on a side drag and could even snap the width to
+ * the container edge when the derived size overflowed.
+ *
+ * A locked ratio is enforced on CORNER drags only: the dragged corner
+ * follows the pointer on the width axis, the height is derived from the
+ * ratio and everything is anchored at the opposite corner. Ratio presets
+ * still re-fit on click, and Full area / Copy to all / drawing keep their
+ * ratio-aware behavior.
  */
 function resizeWithHandles(
   dm: DragMode,
@@ -131,6 +140,7 @@ function resizeWithHandles(
   const grabE = dir.includes('e')
   const grabN = dir.includes('n')
   const grabS = dir.includes('s')
+  const isCorner = dir.length === 2
 
   // 1) Move only the grabbed edges.
   if (grabW) left = start.x + dx
@@ -158,47 +168,27 @@ function resizeWithHandles(
     else bottom = Math.min(ch, top + MIN_SIZE)
   }
 
-  // 4) Ratio: dominant axis follows the pointer, other axis derived.
-  if (ratio) {
-    const heightDominant = dm === 'resize-n' || dm === 'resize-s'
-    const midEdge = heightDominant || dm === 'resize-e' || dm === 'resize-w'
+  // 4) Ratio: corner drags only. Width leads, height follows the ratio and
+  // the opposite corner stays anchored. The derived size is capped by the
+  // room available FROM THE ANCHOR EDGES so the container clamps can never
+  // break the ratio (no off-ratio rects, no size snaps).
+  if (ratio && isCorner) {
+    const maxW = grabW ? right : cw - left
+    const maxH = grabN ? bottom : ch - top
     let w = right - left
-    let h = bottom - top
-    if (heightDominant) {
+    let h = w / ratio
+    if (h > maxH) {
+      h = maxH
       w = h * ratio
-      if (w > cw) {
-        w = cw
-        h = w / ratio
-      }
-    } else {
+    }
+    if (w > maxW) {
+      w = maxW
       h = w / ratio
-      if (h > ch) {
-        h = ch
-        w = h * ratio
-      }
     }
-    if (midEdge) {
-      // Mid handles: keep the selection centered on its own center line.
-      if (heightDominant) {
-        const cx = start.x + start.width / 2
-        left = clamp(cx - w / 2, 0, Math.max(0, cw - w))
-        right = left + w
-      } else {
-        const cy = start.y + start.height / 2
-        top = clamp(cy - h / 2, 0, Math.max(0, ch - h))
-        bottom = top + h
-      }
-    } else {
-      // Corners: anchor the opposite corner.
-      if (grabW) left = right - w
-      else right = left + w
-      if (grabN) top = bottom - h
-      else bottom = top + h
-    }
-    left = clamp(left, 0, cw)
-    right = clamp(right, 0, cw)
-    top = clamp(top, 0, ch)
-    bottom = clamp(bottom, 0, ch)
+    if (grabW) left = right - w
+    else right = left + w
+    if (grabN) top = bottom - h
+    else bottom = top + h
   }
 
   const width = right - left
@@ -297,16 +287,23 @@ function hitTest(pos: PxPoint, rect: PxRect): DragMode | null {
   const top = rect.y
   const right = rect.x + rect.width
   const bottom = rect.y + rect.height
-  const h = HANDLE_SIZE
+  // Corner zones shrink on small boxes so a mid-edge zone always exists —
+  // grabbing the side of a short/narrow box must never register as a corner
+  // (a corner would change both dimensions on a one-axis gesture).
+  const hz = Math.min(HANDLE_SIZE, rect.width / 2)
+  const vz = Math.min(HANDLE_SIZE, rect.height / 2)
 
-  if (Math.abs(x - left) < h && Math.abs(y - top) < h) return 'resize-nw'
-  if (Math.abs(x - right) < h && Math.abs(y - top) < h) return 'resize-ne'
-  if (Math.abs(x - left) < h && Math.abs(y - bottom) < h) return 'resize-sw'
-  if (Math.abs(x - right) < h && Math.abs(y - bottom) < h) return 'resize-se'
-  if (Math.abs(y - top) < h && x > left && x < right) return 'resize-n'
-  if (Math.abs(y - bottom) < h && x > left && x < right) return 'resize-s'
-  if (Math.abs(x - left) < h && y > top && y < bottom) return 'resize-w'
-  if (Math.abs(x - right) < h && y > top && y < bottom) return 'resize-e'
+  if (Math.abs(x - left) < hz && Math.abs(y - top) < vz) return 'resize-nw'
+  if (Math.abs(x - right) < hz && Math.abs(y - top) < vz) return 'resize-ne'
+  if (Math.abs(x - left) < hz && Math.abs(y - bottom) < vz) return 'resize-sw'
+  if (Math.abs(x - right) < hz && Math.abs(y - bottom) < vz) return 'resize-se'
+  if (Math.abs(y - top) < vz && x > left && x < right) return 'resize-n'
+  if (Math.abs(y - bottom) < vz && x > left && x < right) return 'resize-s'
+  // Side handles also accept grabs a few px OUTSIDE the edge (the visible
+  // border straddles the rect boundary, and a flush edge at x=0 or x=cw
+  // previously fell through and started a brand-new selection).
+  if (Math.abs(x - left) < hz && y > top && y < bottom) return 'resize-w'
+  if (Math.abs(x - right) < hz && y > top && y < bottom) return 'resize-e'
   if (x > left && x < right && y > top && y < bottom) return 'moving'
   return null
 }
@@ -538,12 +535,19 @@ export function CropImagesView({
     // Lock the aspect ratio for the entire drag at pointer-down time.
     const dragRatio = ratioValue(ratio, activeMeta)
     if (hit && px) {
-      // Safety net: a resize with a locked ratio must start from a rect that
-      // is EXACTLY at that ratio. An off-ratio rect (e.g. after Full area or
-      // Copy to all with a preset active) would otherwise snap its width on
-      // the very first pointer move — even for a purely horizontal swipe.
+      // Safety net: a CORNER resize with a locked ratio must start from a
+      // rect that is EXACTLY at that ratio (corner math derives height from
+      // width, so an off-ratio start — e.g. after a single-axis mid-edge
+      // drag — would jump on the first move). Mid-edge handles are strictly
+      // single-axis and never consult the ratio, so they must NOT snap:
+      // snapping would undo the user's one-axis adjustment at grab time.
+      const cornerHit =
+        hit === 'resize-nw' ||
+        hit === 'resize-ne' ||
+        hit === 'resize-sw' ||
+        hit === 'resize-se'
       let startRect: PxRect = { ...px }
-      if (dragRatio && hit !== 'moving') {
+      if (dragRatio && cornerHit) {
         const snapped = fitRectToRatio(px, dragRatio, box.w, box.h)
         if (
           Math.abs(snapped.width - px.width) > 0.5 ||
