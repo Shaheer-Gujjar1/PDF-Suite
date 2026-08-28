@@ -316,17 +316,18 @@ export function CropImagesView({
   const [containerSize, setContainerSize] = React.useState({ w: 0, h: 0 })
 
   const containerRef = React.useRef<HTMLDivElement>(null)
+  // Drag session state — only ever read/written inside pointer event
+  // handlers, so mutating it outside render is safe (and lint-clean).
+  // `ratio` locks the aspect ratio for the whole drag, `lastRect` keeps the
+  // newest px rect so the drag-end check never depends on render timing.
   const drag = React.useRef<{
     mode: DragMode | 'creating'
     anchor: PxPoint
     start: PxRect | null
     box: { w: number; h: number }
+    ratio: number | null
+    lastRect: PxRect | null
   } | null>(null)
-
-  // Latest values for pointer handlers without re-binding mid-drag.
-  const relCropsRef = React.useRef(relCrops)
-  relCropsRef.current = relCrops
-  const activeRatioRef = React.useRef<number | null>(null)
 
   const urlsRef = React.useRef<Record<string, string>>({})
 
@@ -399,6 +400,14 @@ export function CropImagesView({
     }
   }, [files, activeId, relCrops])
 
+  /* ---------------- Editing state for the active image ------------------- */
+  // NOTE: must be declared before the layout effect below — dependency arrays
+  // evaluate synchronously during render, so referencing `activeMeta` from a
+  // later `const` would throw a TDZ ReferenceError.
+  const activeFile = files.find((f) => f.id === activeId) ?? null
+  const activeMeta = activeId ? meta[activeId] ?? null : null
+  const activeRel = activeId ? relCrops[activeId] ?? null : null
+
   /* ---------------- Container measurement -------------------------------- */
   const updateSize = React.useCallback(() => {
     const el = containerRef.current
@@ -441,13 +450,6 @@ export function CropImagesView({
     }
     onChange(Object.keys(crops).length > 0 ? { crops } : null)
   }, [files, relCrops, meta, onChange])
-
-  /* ---------------- Editing state for the active image ------------------- */
-  const activeFile = files.find((f) => f.id === activeId) ?? null
-  const activeMeta = activeId ? meta[activeId] ?? null : null
-  const activeRel = activeId ? relCrops[activeId] ?? null : null
-  const activeRatio = ratioValue(ratio, activeMeta)
-  activeRatioRef.current = activeRatio
 
   const setRelFromPx = React.useCallback(
     (rect: PxRect | null, box: { w: number; h: number }) => {
@@ -502,14 +504,28 @@ export function CropImagesView({
     const pos = posFromEvent(e)
     const px = activeRel ? relToPx(activeRel, box.w, box.h) : null
     const hit = px ? hitTest(pos, px) : null
+    // Lock the aspect ratio for the entire drag at pointer-down time.
+    const dragRatio = ratioValue(ratio, activeMeta)
     if (hit && px) {
-      drag.current = { mode: hit, anchor: pos, start: { ...px }, box }
+      drag.current = {
+        mode: hit,
+        anchor: pos,
+        start: { ...px },
+        box,
+        ratio: dragRatio,
+        lastRect: { ...px },
+      }
     } else {
-      drag.current = { mode: 'creating', anchor: pos, start: null, box }
-      setRelFromPx(
-        { x: pos.x, y: pos.y, width: 0, height: 0 },
-        box
-      )
+      const seed = { x: pos.x, y: pos.y, width: 0, height: 0 }
+      drag.current = {
+        mode: 'creating',
+        anchor: pos,
+        start: null,
+        box,
+        ratio: dragRatio,
+        lastRect: seed,
+      }
+      setRelFromPx(seed, box)
     }
   }
 
@@ -519,10 +535,9 @@ export function CropImagesView({
     const pos = posFromEvent(e)
     const { w: cw, h: ch } = d.box
     if (d.mode === 'creating') {
-      setRelFromPx(
-        createRect(d.anchor, pos, cw, ch, activeRatioRef.current),
-        d.box
-      )
+      const r = createRect(d.anchor, pos, cw, ch, d.ratio)
+      d.lastRect = r
+      setRelFromPx(r, d.box)
       return
     }
     if (!d.start) return
@@ -534,24 +549,18 @@ export function CropImagesView({
       setRelFromPx({ ...d.start, x, y }, d.box)
       return
     }
-    setRelFromPx(
-      resizeWithHandles(d.mode, d.start, dx, dy, cw, ch, activeRatioRef.current),
-      d.box
-    )
+    const next = resizeWithHandles(d.mode, d.start, dx, dy, cw, ch, d.ratio)
+    d.lastRect = next
+    setRelFromPx(next, d.box)
   }
 
   const endDrag = () => {
     const d = drag.current
     drag.current = null
-    if (d && d.mode === 'creating') {
-      // Discard accidental tiny selections.
-      const rel = relCropsRef.current[activeId ?? '']
-      if (rel && d.box.w > 0 && d.box.h > 0) {
-        const wPx = rel.w * d.box.w
-        const hPx = rel.h * d.box.h
-        if (wPx < MIN_SIZE || hPx < MIN_SIZE) {
-          setRelFromPx(null, d.box)
-        }
+    if (d && d.mode === 'creating' && d.lastRect) {
+      // Discard accidental tiny selections (e.g. a single click).
+      if (d.lastRect.width < MIN_SIZE || d.lastRect.height < MIN_SIZE) {
+        setRelFromPx(null, d.box)
       }
     }
   }
