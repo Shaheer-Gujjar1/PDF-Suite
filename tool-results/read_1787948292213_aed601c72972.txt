@@ -582,3 +582,91 @@
    582→Stage Summary:
    583→- Crop editor interaction is now deterministic: anchored handles, stable rects across image switches, instant visual feedback from ratio presets
    584→
+   585→---
+   586→Task ID: 5
+   587→Agent: Super Z (main agent)
+   588→Task: Fix Crop Images bug — top-middle handle changed the width on horizontal swipe (user report after Task 4's fix)
+   589→
+   590→Work Log:
+   591→- Reproduced in browser (agent-browser + synthetic pointer drags): grabbing the top-mid handle and swiping left/right changed the crop width (519→345 snap in ratio mode; 295→185→75 drift in free mode)
+   592→- ROOT CAUSE (substring trap): resizeWithHandles() used dm.includes('e'/'s'/'n'/'w') on the FULL drag-mode string. 'resize-n'.includes('e') === true because the word "resize" contains 'e' — so the n/s mid handles also dragged the right edge (width followed dx), and e/w handles also dragged the bottom edge (height followed dy). Ratio mode masked it because the ratio branch re-derives width from height; free mode exposed it. Fix: parse the direction from the mode suffix (dm.slice('resize-'.length)) into grabW/grabE/grabN/grabS flags; replaced all dm.includes() checks
+   593→- Hardened ratio mode against width snaps (found while reproducing):
+   594→  1. selectFull() now respects the active ratio (fits the largest ratio-correct rect, centered) — "Full area" with 1:1 used to create an off-ratio 519×346 rect that snapped its width on the first handle move
+   595→  2. copyToAll() fits the copied rect to the ratio per image in that image's natural pixel space ("Original" = each image's own aspect)
+   596→  3. Pointer-down safety net: a resize drag with a locked ratio snaps the start rect to the ratio at grab time, so no off-ratio rect can ever jump mid-drag
+   597→- Mid-edge handles in ratio mode now scale symmetrically around the selection center (a centered handle no longer runs one edge away); corners still anchor the opposite corner
+   598→- posFromEvent() now subtracts container border (clientLeft/clientTop) and clamps to clientWidth/Height, aligning pointer coords with the overlay's coordinate space (was offset by the 2px border)
+   599→- Verified with 7 synthetic pointer-drag tests in browser: free-mode n-handle horizontal swipe → width unchanged; e/w handles with vertical component → height unchanged (old code: h→277); s-handle horizontal → width unchanged; SE corner → NW anchored; 1:1 + Full area → ratio-correct rect + stable horizontal swipe; 1:1 vertical n-drag → symmetric 296×296. All exact-match
+   600→- bun run lint clean; removed temporary public/test-photo.jpg test asset
+   601→
+   602→Stage Summary:
+   603→- The width-change-on-horizontal-swipe bug is fixed at its root (substring matching on the drag-mode string); all four mid-edge handles now move ONLY their own edge in free mode
+   604→- Ratio-locked cropping can no longer produce surprise width snaps from Full area / Copy to all / drag start
+   605→
+   606→---
+   607→Task ID: 6
+   608→Agent: Super Z (main agent)
+   609→Task: Fix Crop Images mid-edge handles — dragging left/right or top/bottom handles changed BOTH width and height (user report; user asked to mirror iloveimg.com)
+   610→
+   611→Work Log:
+   612→- Tested iloveimg.com/crop-image live (agent-browser + synthetic pointer drags on its Cropper.js box): iloveimg's crop tool has NO ratio lock — mid-edge handles are strictly single-axis (e +60 → dW=60/dH=0; vertical swipe on e → no change; horizontal swipe on n → no change); our Free mode already matched exactly
+   613→- Reproduced the user's bug locally in ratio-locked modes; three defects found in resizeWithHandles()' ratio branch:
+   614→  1. e/w mid drags re-centered the height around the selection center → both dimensions changed on a side drag (exact user complaint)
+   615→  2. n/s mid drags applied the derived width via re-centering; when the derived width overflowed the container it snapped to full width → width jumped on a top/bottom drag
+   616→  3. Clamps ran after ratio math without re-deriving → off-ratio rects (e.g. 1:1 drag produced 405.6×346; 16:9 n-drag produced 519×318.97)
+   617→- Fixed resizeWithHandles(): mid-edge handles (n/s/e/w) are now STRICTLY single-axis in every mode — dragged edge follows the pointer, opposite edge never moves, perpendicular dimension untouched, ratio never consulted. A locked ratio is enforced on CORNER drags only (width leads, height derived, opposite corner anchored) with the derived size capped by the room available FROM the anchor edges (maxW = grabW ? right : cw-left; maxH = grabN ? bottom : ch-top) so container clamps can never break the ratio
+   618→- Pointer-down ratio snap now applies to corner hits only (mid handles must not snap: it would undo the user's one-axis adjustment at grab time)
+   619→- Hardened hitTest(): corner zones shrink to min(HANDLE_SIZE, box/2) on small boxes so a short/narrow box always keeps usable mid-edge zones; w/e handles now accept grabs a few px OUTSIDE the edge line and at flush edges (x=0/x=cw previously fell through to 'creating' and destroyed the selection)
+   620→- Fixed test helper false-match: scoped getRect selector to the editor container (the active batch thumbnail also carries border-2 border-primary)
+   621→- Verified with 17 synthetic drag tests in browser: FREE e/w/n/s single-axis exact (incl. cross-axis no-ops, opposite-edge anchoring, flush-edge), 1:1 e/w/n/s single-axis, 1:1 SE corner enforces 346×346 anchored NW, 16:9 corner keeps 490.7×276, short 300×40 box middle-edge grab stays single-axis, flush x=0 grab resizes instead of re-creating, corners in Free change both axes, Original + e-drag width-only, move + ratio-aware draw intact
+   622→- End-to-end regression: drew rect → Run Crop Images → downloaded test-photo-cropped.jpg → 462×308 px, exactly matching the 200×133.33 container selection at 2.312 scale
+   623→- bun run lint clean; removed temporary public/test-photo.jpg
+   624→
+   625→Stage Summary:
+   626→- Mid-edge handles now behave like iloveimg/Cropper.js in ALL modes: one handle = one axis, opposite side fixed
+   627→- Ratio presets now govern corners, preset clicks, drawing, Full area and Copy to all — not mid-edge drags
+   628→- No code path can produce an off-ratio rect from a corner drag, and no side drag can move the opposite edge or the perpendicular dimension
+   629→
+   630→---
+   631→Task ID: 4
+   632→Agent: main (orchestrator)
+   633→Task: Mark Crop Images as production-locked + add "Convert Images" tool (any format -> PNG/JPG/JPEG/WEBP, per-file formats, single/ZIP download).
+   634→
+   635→Work Log:
+   636→- Marked `crop-images` tool entry with `locked: true` in `src/lib/tools.ts` (emerald lock pill on the card) per user's "mark this one too".
+   637→- Added `convert-images` tool entry (name "Convert Images", icon Repeat, category image, accent orange, batch, step 7, locked).
+   638→- Added `'convert-images'` to `ProcessorType` union (`src/lib/processing/types.ts`) and to `toolProcessors` registry (`src/lib/processing/registry.ts`).
+   639→- New worker processor `processors['convert-images']` in `src/lib/processing/worker-source.ts`: per-file target formats via `opts.formats[fileName]` (png/jpg/jpeg/webp), `opts.quality` for lossy targets, native decode via `createImageBitmap` with `imageOrientation: 'from-image'` (EXIF-safe), white-flatten for JPEG alpha, encoder-fallback guard (never emits mislabeled files), output named `basename.targetext`.
+   640→- New view `src/components/tools/convert-images-view.tsx`: global "Same format for all" select + quality slider (50-100%, default 92), per-file rows with thumbnail, size, dimensions, source->target format, per-row format Select (PNG/JPG/JPEG/WEBP), remove buttons, "Add more images" tile, transparency hint; emits `ConvertImagesResult { formats, quality }` via onChange (same stable-identity pattern as CropImagesView).
+   641→- Wired into `src/components/tool-page.tsx`: input config `accept: 'image/*'` hint "any image format", added to INTERACTIVE_TOOLS, `isConvertImages` branch in handleProcess (per-file mode, all files, options.formats/quality), render branch with ConvertImagesView, add-more input accepts image/*; renamed `cropImageFiles` -> `stableImageFiles` shared by both image tool views.
+   642→- Verified in browser (agent-browser): uploaded test-photo.jpg + test-checker.png + test-webp.webp, set different formats per file (JPG->WEBP, PNG->JPG, WEBP->JPEG), ran: 3 of 3 complete at 2x parallel, output dims match sources exactly (1200x800, 640x480, 800x600), in-page encoder magic-byte check passed (RIFF/WEBP, JFIF/JPEG, PNG), per-file Download + Download All (.ZIP) clicked with zero page errors.
+   643→- Regression: Crop Images still renders, full-area crop draws, Run enables. Lock pills confirmed on Crop Images + Convert Images + Merge PDF cards.
+   644→- `bun run lint` clean; dev.log shows clean compiles.
+   645→
+   646→Stage Summary:
+   647→- Crop Images now carries the production-lock badge; Convert Images shipped fully working (batch, per-file target formats incl. JPG/JPEG duality, quality control, per-file + ZIP downloads) and is also marked locked after verification. ToolForge now has 24 tools, 12 of them production-locked.
+   648→
+   649→---
+   650→Task ID: 5
+   651→Agent: main (orchestrator)
+   652→Task: Add "Favicon Generator" tool (any image format -> multi-size .ico). Also: standing rule — never mark a tool locked/perfect unless the user commands it; removed the auto-added lock from Convert Images.
+   653→
+   654→Work Log:
+   655→- Standing rule recorded: `locked: true` is ONLY set when the user explicitly commands it. Crop Images stays locked (user-ordered in Task 4); Convert Images lock removed (was self-initiated, user corrected).
+   656→- Added `favicon-generator` tool entry ("Favicon Generator", icon Globe, category image, accent orange, batch, step 7, NOT locked) in `src/lib/tools.ts`.
+   657→- Added `'favicon-generator'` to `ProcessorType` union + `toolProcessors` registry.
+   658→- New view `src/components/tools/favicon-view.tsx`: size preset buttons (Classic 16/32/48, Full 16-256) + toggleable size chips (16/32/48/64/128/256), per-file rows with thumbnail + live 16/32/48 px "browser tab" canvas previews, add-more tile, empty-sizes guard (emits null -> Run disabled), emits `FaviconResult { sizes }`.
+   659→- Worker (`src/lib/processing/worker-source.ts`):
+   660→  - `encodeIcoBmp(imageData)`: 32-bit BMP DIB — BITMAPINFOHEADER (biHeight doubled), bottom-up BGRA XOR plane, 1bpp AND mask (bits set only for fully transparent pixels).
+   661→  - `buildIcoFile(entries)`: ICONDIR (type 1) + 16-byte ICONDIRENTRY per size (256 stored as width-byte 0), planes=1, bpp=32, correct offsets/lengths.
+   662→  - `processors['favicon-generator']`: native decode with EXIF orientation, contain-fit onto transparent square per size (no stretching), sizes >= 256 embedded as PNG entries, < 256 as classic BMP DIBs (Windows Explorer compatibility), output `<basename>.ico` with `image/x-icon` + note "16/32/48 px".
+   663→- Wired into `tool-page.tsx` (input config image/*, INTERACTIVE_TOOLS, isFaviconGenerator per-file branch passing opts.sizes, render branch, add-more accept).
+   664→- Fixed a self-inflicted regression during editing: a MultiEdit accidentally dropped convert-images' encoder-fallback guard + out.push block; restored immediately and verified via grep + smoke test.
+   665→- Unit tests (`scripts/test-ico-encoder.ts`, bun): 31 byte-level assertions on the real WORKER_SOURCE helpers (DIB header fields, BGRA bottom-up order, straight alpha, AND-mask bits, ICONDIR fields, 256->0 byte, offsets, PNG payload intact) — ALL PASSED.
+   666→- Browser E2E (agent-browser): 3 files uploaded, Classic preset -> 3 of 3 generated (14.7 KB each); captured the actual download blob via URL.createObjectURL patch and parsed it: reserved=0 type=1 count=3, DIB sizes exactly 1128/4264/9640 bytes (= 40+xor+and), biHeight doubled, eof-ok. Full preset -> 6 entries: 16-128 DIB + 256 as PNG (width-byte 0), eof-ok. Download All (.ZIP) captured application/zip 98 KB. Live previews: 9/9 canvases painted. Zero page errors.
+   667→- Regression: Convert Images re-run (PNG -> PNG) 1 of 1 complete. Lock pills verified: Crop Images=YES, Convert Images=no, Favicon Generator=no.
+   668→- `bun run lint` clean; dev.log clean compiles.
+   669→
+   670→Stage Summary:
+   671→- ToolForge now ships 25 tools / 18 implemented; Favicon Generator live (batch, any-format decode, true multi-size ICO with BMP+PNG entries, live tab preview, per-file + ZIP download). Lock policy: only user-commanded locks (currently Crop Images).
+   672→

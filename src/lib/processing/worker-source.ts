@@ -2154,7 +2154,9 @@ processors['favicon-generator'] = async function (inputs, opts, onProgress, log)
         'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
       );
     }
+    var base = stripExt(input.fileName);
     var entries = [];
+    var pngs = [];
     for (var s = 0; s < sizes.length; s++) {
       var size = sizes[s];
       var canvas = new OffscreenCanvas(size, size);
@@ -2173,19 +2175,33 @@ processors['favicon-generator'] = async function (inputs, opts, onProgress, log)
         dh
       );
       if (size >= 256) {
-        var png = await canvas.convertToBlob({ type: 'image/png' });
-        entries.push({ size: size, data: new Uint8Array(await png.arrayBuffer()) });
+        /* One PNG serves both the .ico entry and the standalone file. */
+        var bigPng = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+        entries.push({ size: size, data: new Uint8Array(bigPng) });
+        pngs.push({ size: size, data: bigPng });
       } else {
+        /* Classic 32-bit BMP DIB inside the .ico for compatibility… */
         entries.push({ size: size, data: encodeIcoBmp(ctx.getImageData(0, 0, size, size)) });
+        /* …plus a standalone PNG copy of the same size. */
+        var smallPng = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+        pngs.push({ size: size, data: smallPng });
       }
     }
     if (bmp.close) bmp.close();
     out.push({
-      name: stripExt(input.fileName) + '.ico',
+      name: base + '.ico',
       data: buildIcoFile(entries),
       mime: 'image/x-icon',
-      note: sizes.join('/') + ' px',
+      note: sizes.join('/') + ' px · ico + ' + pngs.length + ' PNGs',
     });
+    for (var p = 0; p < pngs.length; p++) {
+      out.push({
+        name: base + '-' + pngs[p].size + 'x' + pngs[p].size + '.png',
+        data: pngs[p].data,
+        mime: 'image/png',
+        note: pngs[p].size + 'x' + pngs[p].size + ' PNG',
+      });
+    }
     onProgress((i + 1) / inputs.length);
   }
   onProgress(1);

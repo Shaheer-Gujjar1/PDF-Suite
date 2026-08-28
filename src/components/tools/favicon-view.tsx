@@ -267,7 +267,9 @@ export function FaviconGeneratorView({
                       : ''}
                     {' · '}
                     <span className="font-medium text-primary">
-                      {sizes.length > 0 ? `${sizes.join('/')} → .ico` : '.ico'}
+                      {sizes.length > 0
+                        ? `${sizes.join('/')} → .ico + ${sizes.length} PNGs`
+                        : '.ico'}
                     </span>
                   </p>
                 </div>
@@ -305,11 +307,13 @@ export function FaviconGeneratorView({
         <GlobeIcon className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
         <p className="text-muted-foreground">
           Drop your logo in any format — JPG, PNG, WEBP, GIF, BMP and more.
-          Non-square images are centered on a transparent square background,
-          so nothing gets stretched. Sizes 16–128 px are stored as classic
-          BMP entries and 256 px as PNG for maximum compatibility with
-          browsers and Windows. Everything is generated locally; files never
-          leave your device.
+          You get one multi-size <span className="font-medium text-foreground">.ico</span>{' '}
+          (all sizes packed inside a single file — browsers and Windows pick
+          the sharpest one automatically) plus a ready-to-use PNG for every
+          size, e.g. <span className="font-medium text-foreground">favicon-32x32.png</span>,
+          for asset pipelines and meta tags. Non-square images are centered on
+          a transparent square background, so nothing gets stretched.
+          Everything is generated locally; files never leave your device.
         </p>
       </div>
     </div>
