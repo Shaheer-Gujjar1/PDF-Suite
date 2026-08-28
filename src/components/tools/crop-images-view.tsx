@@ -102,8 +102,10 @@ function relToPx(rel: RelRect, cw: number, ch: number): PxRect {
 /**
  * Resize by moving ONLY the edges/corner the user grabbed.
  * Every untouched edge stays exactly where it is. When a ratio is active,
- * the dominant axis follows the pointer and the derived axis is anchored
- * on the opposite edge of the grabbed handle.
+ * the dominant axis follows the pointer and the derived axis is computed
+ * from it: mid-edge handles (n/s/e/w) scale symmetrically around the
+ * selection center (a centered handle must not run one edge away), while
+ * corners anchor the opposite corner.
  */
 function resizeWithHandles(
   dm: DragMode,
@@ -119,17 +121,28 @@ function resizeWithHandles(
   let right = start.x + start.width
   let bottom = start.y + start.height
 
+  // Which edges did the user grab? Parse the direction from the mode SUFFIX
+  // ('n', 'se', …). NEVER dm.includes() on the full string: the word "resize"
+  // itself contains 'e' and 's', so 'resize-n'.includes('e') was true — the
+  // top handle also dragged the right edge, changing the width on every
+  // horizontal swipe.
+  const dir = dm.slice('resize-'.length)
+  const grabW = dir.includes('w')
+  const grabE = dir.includes('e')
+  const grabN = dir.includes('n')
+  const grabS = dir.includes('s')
+
   // 1) Move only the grabbed edges.
-  if (dm.includes('w')) left = start.x + dx
-  if (dm.includes('e')) right = start.x + start.width + dx
-  if (dm.includes('n')) top = start.y + dy
-  if (dm.includes('s')) bottom = start.y + start.height + dy
+  if (grabW) left = start.x + dx
+  if (grabE) right = start.x + start.width + dx
+  if (grabN) top = start.y + dy
+  if (grabS) bottom = start.y + start.height + dy
 
   // 2) Min size on each moved edge, anchored to the opposite edge.
-  if (dm.includes('w') && right - left < MIN_SIZE) left = right - MIN_SIZE
-  if (dm.includes('e') && right - left < MIN_SIZE) right = left + MIN_SIZE
-  if (dm.includes('n') && bottom - top < MIN_SIZE) top = bottom - MIN_SIZE
-  if (dm.includes('s') && bottom - top < MIN_SIZE) bottom = top + MIN_SIZE
+  if (grabW && right - left < MIN_SIZE) left = right - MIN_SIZE
+  if (grabE && right - left < MIN_SIZE) right = left + MIN_SIZE
+  if (grabN && bottom - top < MIN_SIZE) top = bottom - MIN_SIZE
+  if (grabS && bottom - top < MIN_SIZE) bottom = top + MIN_SIZE
 
   // 3) Keep inside the container without crossing the opposite edge.
   left = clamp(left, 0, cw)
@@ -137,17 +150,18 @@ function resizeWithHandles(
   top = clamp(top, 0, ch)
   bottom = clamp(bottom, 0, ch)
   if (right - left < MIN_SIZE) {
-    if (dm.includes('w')) left = Math.max(0, right - MIN_SIZE)
+    if (grabW) left = Math.max(0, right - MIN_SIZE)
     else right = Math.min(cw, left + MIN_SIZE)
   }
   if (bottom - top < MIN_SIZE) {
-    if (dm.includes('n')) top = Math.max(0, bottom - MIN_SIZE)
+    if (grabN) top = Math.max(0, bottom - MIN_SIZE)
     else bottom = Math.min(ch, top + MIN_SIZE)
   }
 
-  // 4) Ratio: dominant axis follows the pointer, other axis derived + anchored.
+  // 4) Ratio: dominant axis follows the pointer, other axis derived.
   if (ratio) {
     const heightDominant = dm === 'resize-n' || dm === 'resize-s'
+    const midEdge = heightDominant || dm === 'resize-e' || dm === 'resize-w'
     let w = right - left
     let h = bottom - top
     if (heightDominant) {
@@ -163,10 +177,24 @@ function resizeWithHandles(
         w = h * ratio
       }
     }
-    if (dm.includes('w')) left = right - w
-    else right = left + w
-    if (dm.includes('n')) top = bottom - h
-    else bottom = top + h
+    if (midEdge) {
+      // Mid handles: keep the selection centered on its own center line.
+      if (heightDominant) {
+        const cx = start.x + start.width / 2
+        left = clamp(cx - w / 2, 0, Math.max(0, cw - w))
+        right = left + w
+      } else {
+        const cy = start.y + start.height / 2
+        top = clamp(cy - h / 2, 0, Math.max(0, ch - h))
+        bottom = top + h
+      }
+    } else {
+      // Corners: anchor the opposite corner.
+      if (grabW) left = right - w
+      else right = left + w
+      if (grabN) top = bottom - h
+      else bottom = top + h
+    }
     left = clamp(left, 0, cw)
     right = clamp(right, 0, cw)
     top = clamp(top, 0, ch)
@@ -482,9 +510,12 @@ export function CropImagesView({
     const el = containerRef.current
     if (!el) return { x: 0, y: 0 }
     const r = el.getBoundingClientRect()
+    // The container has a border; the overlay lives inside it. Subtract the
+    // border so pointer coordinates share the exact space as clientWidth and
+    // the absolutely positioned crop rect (otherwise every hit is offset).
     return {
-      x: clamp(e.clientX - r.left, 0, r.width),
-      y: clamp(e.clientY - r.top, 0, r.height),
+      x: clamp(e.clientX - r.left - el.clientLeft, 0, el.clientWidth),
+      y: clamp(e.clientY - r.top - el.clientTop, 0, el.clientHeight),
     }
   }
 
@@ -507,13 +538,28 @@ export function CropImagesView({
     // Lock the aspect ratio for the entire drag at pointer-down time.
     const dragRatio = ratioValue(ratio, activeMeta)
     if (hit && px) {
+      // Safety net: a resize with a locked ratio must start from a rect that
+      // is EXACTLY at that ratio. An off-ratio rect (e.g. after Full area or
+      // Copy to all with a preset active) would otherwise snap its width on
+      // the very first pointer move — even for a purely horizontal swipe.
+      let startRect: PxRect = { ...px }
+      if (dragRatio && hit !== 'moving') {
+        const snapped = fitRectToRatio(px, dragRatio, box.w, box.h)
+        if (
+          Math.abs(snapped.width - px.width) > 0.5 ||
+          Math.abs(snapped.height - px.height) > 0.5
+        ) {
+          setRelFromPx(snapped, box)
+        }
+        startRect = snapped
+      }
       drag.current = {
         mode: hit,
         anchor: pos,
-        start: { ...px },
+        start: startRect,
         box,
         ratio: dragRatio,
-        lastRect: { ...px },
+        lastRect: { ...startRect },
       }
     } else {
       const seed = { x: pos.x, y: pos.y, width: 0, height: 0 }
@@ -594,7 +640,12 @@ export function CropImagesView({
     const el = containerRef.current
     if (!el || !activeId) return
     const box = { w: el.clientWidth, h: el.clientHeight }
-    setRelFromPx({ x: 0, y: 0, width: box.w, height: box.h }, box)
+    const full: PxRect = { x: 0, y: 0, width: box.w, height: box.h }
+    // Respect the active ratio: an off-ratio "full" rect would snap its
+    // width the moment any handle is dragged. Fit the largest ratio-correct
+    // rect inside the full area, centered.
+    const r = ratioValue(ratio, activeMeta)
+    setRelFromPx(r ? fitRectToRatio(full, r, box.w, box.h) : full, box)
   }
 
   const resetCrop = () => {
@@ -611,7 +662,38 @@ export function CropImagesView({
     setRelCrops(() => {
       const next: Record<string, RelRect> = {}
       for (const f of files) {
-        next[f.id] = { ...activeRel }
+        const m = meta[f.id]
+        // Fixed presets are absolute; "Original" means each image's own.
+        const r =
+          ratio === 'free'
+            ? null
+            : ratio === 'original' && m
+              ? m.width / m.height
+              : ratioValue(ratio, activeMeta)
+        if (r && m) {
+          // Fit the copied region to the ratio in THIS image's pixel space,
+          // so no image ends up with an off-ratio rect that would snap on
+          // the next handle drag.
+          const fitted = fitRectToRatio(
+            {
+              x: activeRel.x * m.width,
+              y: activeRel.y * m.height,
+              width: activeRel.w * m.width,
+              height: activeRel.h * m.height,
+            },
+            r,
+            m.width,
+            m.height
+          )
+          next[f.id] = {
+            x: fitted.x / m.width,
+            y: fitted.y / m.height,
+            w: fitted.width / m.width,
+            h: fitted.height / m.height,
+          }
+        } else {
+          next[f.id] = { ...activeRel }
+        }
       }
       return next
     })

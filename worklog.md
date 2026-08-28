@@ -581,3 +581,24 @@ Work Log:
 
 Stage Summary:
 - Crop editor interaction is now deterministic: anchored handles, stable rects across image switches, instant visual feedback from ratio presets
+
+---
+Task ID: 5
+Agent: Super Z (main agent)
+Task: Fix Crop Images bug — top-middle handle changed the width on horizontal swipe (user report after Task 4's fix)
+
+Work Log:
+- Reproduced in browser (agent-browser + synthetic pointer drags): grabbing the top-mid handle and swiping left/right changed the crop width (519→345 snap in ratio mode; 295→185→75 drift in free mode)
+- ROOT CAUSE (substring trap): resizeWithHandles() used dm.includes('e'/'s'/'n'/'w') on the FULL drag-mode string. 'resize-n'.includes('e') === true because the word "resize" contains 'e' — so the n/s mid handles also dragged the right edge (width followed dx), and e/w handles also dragged the bottom edge (height followed dy). Ratio mode masked it because the ratio branch re-derives width from height; free mode exposed it. Fix: parse the direction from the mode suffix (dm.slice('resize-'.length)) into grabW/grabE/grabN/grabS flags; replaced all dm.includes() checks
+- Hardened ratio mode against width snaps (found while reproducing):
+  1. selectFull() now respects the active ratio (fits the largest ratio-correct rect, centered) — "Full area" with 1:1 used to create an off-ratio 519×346 rect that snapped its width on the first handle move
+  2. copyToAll() fits the copied rect to the ratio per image in that image's natural pixel space ("Original" = each image's own aspect)
+  3. Pointer-down safety net: a resize drag with a locked ratio snaps the start rect to the ratio at grab time, so no off-ratio rect can ever jump mid-drag
+- Mid-edge handles in ratio mode now scale symmetrically around the selection center (a centered handle no longer runs one edge away); corners still anchor the opposite corner
+- posFromEvent() now subtracts container border (clientLeft/clientTop) and clamps to clientWidth/Height, aligning pointer coords with the overlay's coordinate space (was offset by the 2px border)
+- Verified with 7 synthetic pointer-drag tests in browser: free-mode n-handle horizontal swipe → width unchanged; e/w handles with vertical component → height unchanged (old code: h→277); s-handle horizontal → width unchanged; SE corner → NW anchored; 1:1 + Full area → ratio-correct rect + stable horizontal swipe; 1:1 vertical n-drag → symmetric 296×296. All exact-match
+- bun run lint clean; removed temporary public/test-photo.jpg test asset
+
+Stage Summary:
+- The width-change-on-horizontal-swipe bug is fixed at its root (substring matching on the drag-mode string); all four mid-edge handles now move ONLY their own edge in free mode
+- Ratio-locked cropping can no longer produce surprise width snaps from Full area / Copy to all / drag start
