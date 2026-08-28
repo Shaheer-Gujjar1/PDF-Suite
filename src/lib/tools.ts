@@ -22,6 +22,7 @@ import {
   ShieldCheck,
   Combine,
   Repeat,
+  Globe,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -139,7 +140,17 @@ export const tools: Tool[] = [
     accent: "orange",
     batch: true,
     step: 7,
-    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+  {
+    id: "favicon-generator",
+    name: "Favicon Generator",
+    description:
+      "Turn any image — JPG, PNG, WEBP, GIF, BMP and more — into a crisp multi-size .ico favicon (16–256 px). Batch ready; download each or all as ZIP.",
+    category: "image",
+    icon: Globe,
+    accent: "orange",
+    batch: true,
+    step: 7,
   },
 
   // ---------- Organize ----------

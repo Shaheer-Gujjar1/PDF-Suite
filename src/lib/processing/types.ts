@@ -36,6 +36,7 @@ export type ProcessorType =
   // Step 7 — Image tools
   | 'crop-images'
   | 'convert-images'
+  | 'favicon-generator'
 
 export interface ProcessInput {
   id: string

@@ -2051,6 +2051,147 @@ processors['convert-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- ICO encoding helpers (favicon generator) --------------------------- */
+
+/* Encode an ImageData (RGBA, top-down) as a 32-bit ICO DIB:
+   BITMAPINFOHEADER + bottom-up BGRA pixels (XOR plane) + 1bpp AND mask. */
+function encodeIcoBmp(imageData) {
+  var w = imageData.width;
+  var h = imageData.height;
+  var px = imageData.data;
+  var xorRow = w * 4; /* 32bpp rows are always 4-byte aligned */
+  var andRow = ((w + 31) >> 5) << 2; /* 1bpp rows padded to 4 bytes */
+  var xorSize = xorRow * h;
+  var andSize = andRow * h;
+  var buf = new ArrayBuffer(40 + xorSize + andSize);
+  var view = new DataView(buf);
+  var bytes = new Uint8Array(buf);
+  /* BITMAPINFOHEADER — biHeight counts both XOR and AND masks. */
+  view.setUint32(0, 40, true);
+  view.setInt32(4, w, true);
+  view.setInt32(8, h * 2, true);
+  view.setUint16(12, 1, true);
+  view.setUint16(14, 32, true);
+  view.setUint32(16, 0, true); /* BI_RGB, no compression */
+  view.setUint32(20, xorSize + andSize, true);
+  /* Pixels: bottom-up, BGRA byte order. */
+  var off = 40;
+  for (var y = h - 1; y >= 0; y--) {
+    var src = y * xorRow;
+    for (var x = 0; x < w; x++) {
+      var i = src + x * 4;
+      bytes[off++] = px[i + 2]; /* B */
+      bytes[off++] = px[i + 1]; /* G */
+      bytes[off++] = px[i]; /* R */
+      bytes[off++] = px[i + 3]; /* A */
+    }
+  }
+  /* AND mask: bit 1 = transparent. Only fully transparent pixels are masked;
+     renderers that honor the alpha channel ignore these bits anyway. */
+  var maskOff = 40 + xorSize;
+  for (var row = 0; row < h; row++) {
+    var ySrc = h - 1 - row;
+    var dst = maskOff + row * andRow;
+    for (var x2 = 0; x2 < w; x2++) {
+      if (px[(ySrc * w + x2) * 4 + 3] === 0) {
+        bytes[dst + (x2 >> 3)] |= 0x80 >> (x2 & 7);
+      }
+    }
+  }
+  return bytes;
+}
+
+/* Pack an ICO container: ICONDIR + one ICONDIRENTRY per image + payloads. */
+function buildIcoFile(entries) {
+  var count = entries.length;
+  var headerSize = 6 + count * 16;
+  var total = headerSize;
+  for (var i = 0; i < count; i++) total += entries[i].data.length;
+  var buf = new ArrayBuffer(total);
+  var view = new DataView(buf);
+  var bytes = new Uint8Array(buf);
+  view.setUint16(0, 0, true); /* reserved */
+  view.setUint16(2, 1, true); /* type: icon */
+  view.setUint16(4, count, true); /* image count */
+  var offset = headerSize;
+  for (var j = 0; j < count; j++) {
+    var e = entries[j];
+    var base = 6 + j * 16;
+    view.setUint8(base, e.size >= 256 ? 0 : e.size); /* 256 is stored as 0 */
+    view.setUint8(base + 1, e.size >= 256 ? 0 : e.size);
+    view.setUint8(base + 2, 0); /* colors in palette */
+    view.setUint8(base + 3, 0); /* reserved */
+    view.setUint16(base + 4, 1, true); /* color planes */
+    view.setUint16(base + 6, 32, true); /* bits per pixel */
+    view.setUint32(base + 8, e.data.length, true);
+    view.setUint32(base + 12, offset, true);
+    bytes.set(e.data, offset);
+    offset += e.data.length;
+  }
+  return buf;
+}
+
+/* ---- Favicon Generator (any format -> multi-size .ico) ------------------ */
+/* opts.sizes: array of side lengths, e.g. [16, 32, 48, 64, 128, 256].       */
+/* Each source image is contain-fitted onto a square transparent canvas.     */
+/* Sizes >= 256 are embedded as PNG entries; smaller ones as classic 32-bit  */
+/* BMP DIBs for maximum compatibility (Windows Explorer, older parsers).     */
+processors['favicon-generator'] = async function (inputs, opts, onProgress, log) {
+  var sizes = (opts && opts.sizes) || [16, 32, 48, 64, 128, 256];
+  sizes = sizes.filter(function (s) { return s >= 1 && s <= 256; });
+  if (sizes.length === 0) sizes = [16, 32, 48];
+  sizes.sort(function (a, b) { return a - b; });
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    log('Generating favicon for ' + input.fileName);
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var entries = [];
+    for (var s = 0; s < sizes.length; s++) {
+      var size = sizes[s];
+      var canvas = new OffscreenCanvas(size, size);
+      var ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      /* Contain-fit: preserve aspect ratio, center on a transparent square. */
+      var k = Math.min(size / bmp.width, size / bmp.height);
+      var dw = Math.max(1, Math.round(bmp.width * k));
+      var dh = Math.max(1, Math.round(bmp.height * k));
+      ctx.drawImage(
+        bmp,
+        Math.floor((size - dw) / 2),
+        Math.floor((size - dh) / 2),
+        dw,
+        dh
+      );
+      if (size >= 256) {
+        var png = await canvas.convertToBlob({ type: 'image/png' });
+        entries.push({ size: size, data: new Uint8Array(await png.arrayBuffer()) });
+      } else {
+        entries.push({ size: size, data: encodeIcoBmp(ctx.getImageData(0, 0, size, size)) });
+      }
+    }
+    if (bmp.close) bmp.close();
+    out.push({
+      name: stripExt(input.fileName) + '.ico',
+      data: buildIcoFile(entries),
+      mime: 'image/x-icon',
+      note: sizes.join('/') + ' px',
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

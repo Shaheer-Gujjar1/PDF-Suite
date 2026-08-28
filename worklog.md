@@ -645,3 +645,27 @@ Work Log:
 
 Stage Summary:
 - Crop Images now carries the production-lock badge; Convert Images shipped fully working (batch, per-file target formats incl. JPG/JPEG duality, quality control, per-file + ZIP downloads) and is also marked locked after verification. ToolForge now has 24 tools, 12 of them production-locked.
+
+---
+Task ID: 5
+Agent: main (orchestrator)
+Task: Add "Favicon Generator" tool (any image format -> multi-size .ico). Also: standing rule — never mark a tool locked/perfect unless the user commands it; removed the auto-added lock from Convert Images.
+
+Work Log:
+- Standing rule recorded: `locked: true` is ONLY set when the user explicitly commands it. Crop Images stays locked (user-ordered in Task 4); Convert Images lock removed (was self-initiated, user corrected).
+- Added `favicon-generator` tool entry ("Favicon Generator", icon Globe, category image, accent orange, batch, step 7, NOT locked) in `src/lib/tools.ts`.
+- Added `'favicon-generator'` to `ProcessorType` union + `toolProcessors` registry.
+- New view `src/components/tools/favicon-view.tsx`: size preset buttons (Classic 16/32/48, Full 16-256) + toggleable size chips (16/32/48/64/128/256), per-file rows with thumbnail + live 16/32/48 px "browser tab" canvas previews, add-more tile, empty-sizes guard (emits null -> Run disabled), emits `FaviconResult { sizes }`.
+- Worker (`src/lib/processing/worker-source.ts`):
+  - `encodeIcoBmp(imageData)`: 32-bit BMP DIB — BITMAPINFOHEADER (biHeight doubled), bottom-up BGRA XOR plane, 1bpp AND mask (bits set only for fully transparent pixels).
+  - `buildIcoFile(entries)`: ICONDIR (type 1) + 16-byte ICONDIRENTRY per size (256 stored as width-byte 0), planes=1, bpp=32, correct offsets/lengths.
+  - `processors['favicon-generator']`: native decode with EXIF orientation, contain-fit onto transparent square per size (no stretching), sizes >= 256 embedded as PNG entries, < 256 as classic BMP DIBs (Windows Explorer compatibility), output `<basename>.ico` with `image/x-icon` + note "16/32/48 px".
+- Wired into `tool-page.tsx` (input config image/*, INTERACTIVE_TOOLS, isFaviconGenerator per-file branch passing opts.sizes, render branch, add-more accept).
+- Fixed a self-inflicted regression during editing: a MultiEdit accidentally dropped convert-images' encoder-fallback guard + out.push block; restored immediately and verified via grep + smoke test.
+- Unit tests (`scripts/test-ico-encoder.ts`, bun): 31 byte-level assertions on the real WORKER_SOURCE helpers (DIB header fields, BGRA bottom-up order, straight alpha, AND-mask bits, ICONDIR fields, 256->0 byte, offsets, PNG payload intact) — ALL PASSED.
+- Browser E2E (agent-browser): 3 files uploaded, Classic preset -> 3 of 3 generated (14.7 KB each); captured the actual download blob via URL.createObjectURL patch and parsed it: reserved=0 type=1 count=3, DIB sizes exactly 1128/4264/9640 bytes (= 40+xor+and), biHeight doubled, eof-ok. Full preset -> 6 entries: 16-128 DIB + 256 as PNG (width-byte 0), eof-ok. Download All (.ZIP) captured application/zip 98 KB. Live previews: 9/9 canvases painted. Zero page errors.
+- Regression: Convert Images re-run (PNG -> PNG) 1 of 1 complete. Lock pills verified: Crop Images=YES, Convert Images=no, Favicon Generator=no.
+- `bun run lint` clean; dev.log clean compiles.
+
+Stage Summary:
+- ToolForge now ships 25 tools / 18 implemented; Favicon Generator live (batch, any-format decode, true multi-size ICO with BMP+PNG entries, live tab preview, per-file + ZIP download). Lock policy: only user-commanded locks (currently Crop Images).

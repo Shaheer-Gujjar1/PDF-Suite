@@ -28,6 +28,7 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   'edit-text': 'edit-text',
   'crop-images': 'crop-images',
   'convert-images': 'convert-images',
+  'favicon-generator': 'favicon-generator',
 }
 
 export function getProcessor(toolId: string): ProcessorType {

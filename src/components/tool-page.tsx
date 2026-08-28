@@ -40,6 +40,7 @@ import { SignAnnotateView, type SignResult } from '@/components/tools/sign-view'
 import { EditTextView, type EditResult } from '@/components/tools/edit-text-view'
 import { CropImagesView, type CropImagesResult } from '@/components/tools/crop-images-view'
 import { ConvertImagesView, type ConvertImagesResult } from '@/components/tools/convert-images-view'
+import { FaviconGeneratorView, type FaviconResult } from '@/components/tools/favicon-view'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -70,6 +71,8 @@ function getInput(tool: Tool): InputConfig {
       return { accept: 'image/jpeg,image/jpg,image/png,image/webp', multiple: true, hint: 'JPG, PNG, WEBP images', mode: 'files' }
     case 'convert-images':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
+    case 'favicon-generator':
+      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'images-to-pdf':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF', mode: 'files' }
     case 'word-to-pdf':
@@ -83,7 +86,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'favicon-generator']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -95,7 +98,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | FaviconResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -115,6 +118,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isPageNumbers = tool.id === 'page-numbers'
   const isCropImages = tool.id === 'crop-images'
   const isConvertImages = tool.id === 'convert-images'
+  const isFaviconGenerator = tool.id === 'favicon-generator'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -421,6 +425,17 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
       }
       runOptions = { ...options, crops: cropMap }
+    } else if (isFaviconGenerator) {
+      // Favicon Generator: every file becomes one multi-size .ico, per-file.
+      const favRes = interactiveResult as FaviconResult | null
+      for (const qf of files) {
+        const data = await qf.file.arrayBuffer()
+        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+      }
+      runOptions = {
+        ...options,
+        sizes: favRes?.sizes ?? [16, 32, 48, 64, 128, 256],
+      }
     } else if (isConvertImages) {
       // Convert Images: every file is processed, per-file, each with its own
       // target format chosen in the interactive view.
@@ -620,7 +635,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept={isConvertImages ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
+          accept={isConvertImages || isFaviconGenerator ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -682,6 +697,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           />
         ) : isConvertImages && files.length > 0 ? (
           <ConvertImagesView
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isFaviconGenerator && files.length > 0 ? (
+          <FaviconGeneratorView
             files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}
