@@ -502,3 +502,23 @@ Stage Summary:
 - Size is 40% smaller than before (600px → 360px).
 - The "Live preview" info div has been removed.
 - Lint clean.
+
+---
+Task ID: 1
+Agent: Super Z (main agent)
+Task: Clone PDF-Suite repo from GitHub, install dependencies, prepare sandbox environment
+
+Work Log:
+- Cloned https://github.com/Shaheer-Gujjar1/PDF-Suite.git into /home/z/my-project/PDF-Suite
+- Initialized fullstack sandbox environment (init-fullstack.sh) which laid template files at project root
+- Moved all repo contents (src, prisma, db, public, config files, .git, upload test files) from PDF-Suite/ to /home/z/my-project root so the auto dev server runs the user's project
+- Kept sandbox runtime dirs: .zscripts, .env, skills, mini-services
+- Ran bun install (added jszip, pdf-lib, xlsx deltas per repo lockfile)
+- Ran bun run db:push — SQLite db in sync, Prisma Client v6.19.2 generated
+- Restarted dev server via .zscripts/dev.sh (next dev on port 3000, PID ~1587)
+- Verified with agent-browser: home renders, title "PDF Suite — All-in-One PDF Tools, 100% Private", tool navigation to #/merge works, no console/page errors, no dev.log errors
+
+Stage Summary:
+- PDF-Suite (Next.js 16 + TS + Tailwind 4 + shadcn/ui + Prisma) is running at localhost:3000
+- Project ready for enhancement work; git remote origin points to user's GitHub repo
+- Key architecture notes: client-side PDF processing via pdf-lib in worker pool (src/lib/processing/), hash-based routing (src/lib/use-hash-route.ts), tools registry (src/lib/tools.ts), single page route src/app/page.tsx
