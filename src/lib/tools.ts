@@ -152,6 +152,17 @@ export const tools: Tool[] = [
     batch: true,
     step: 7,
   },
+  {
+    id: "watermark-images",
+    name: "Watermark Image",
+    description:
+      "Stamp text or your logo on any image — font, size, color, opacity, rotation, tiling and 9-position placement. Stack multiple watermarks; batch ready.",
+    category: "image",
+    icon: Stamp,
+    accent: "rose",
+    batch: true,
+    step: 7,
+  },
 
   // ---------- Organize ----------
   {

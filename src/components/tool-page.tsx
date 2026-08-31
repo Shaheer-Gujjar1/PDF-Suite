@@ -41,6 +41,10 @@ import { EditTextView, type EditResult } from '@/components/tools/edit-text-view
 import { CropImagesView, type CropImagesResult } from '@/components/tools/crop-images-view'
 import { ConvertImagesView, type ConvertImagesResult } from '@/components/tools/convert-images-view'
 import { FaviconGeneratorView, type FaviconResult } from '@/components/tools/favicon-view'
+import {
+  WatermarkImagesView,
+  type WatermarkImagesResult,
+} from '@/components/tools/watermark-images-view'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -73,6 +77,8 @@ function getInput(tool: Tool): InputConfig {
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'favicon-generator':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
+    case 'watermark-images':
+      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'images-to-pdf':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF', mode: 'files' }
     case 'word-to-pdf':
@@ -86,7 +92,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'favicon-generator']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'favicon-generator', 'watermark-images']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -98,7 +104,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | FaviconResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | FaviconResult | WatermarkImagesResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -119,6 +125,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isCropImages = tool.id === 'crop-images'
   const isConvertImages = tool.id === 'convert-images'
   const isFaviconGenerator = tool.id === 'favicon-generator'
+  const isWatermarkImages = tool.id === 'watermark-images'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -454,6 +461,30 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         ...options,
         sizes: favRes?.sizes ?? [16, 32, 48, 64, 128, 256],
       }
+    } else if (isWatermarkImages) {
+      // Watermark Image: every file keeps its size and format; layers carry
+      // the stamping config (image layers are stripped to plain data and
+      // carry the logo bytes for the worker).
+      const wmRes = interactiveResult as WatermarkImagesResult | null
+      for (const qf of files) {
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
+      }
+      const wmLayers: Record<string, unknown>[] = []
+      for (const layer of wmRes?.layers ?? []) {
+        const base = { ...layer, logo: null, logoUrl: '' }
+        if (layer.type === 'image' && layer.logo) {
+          try {
+            base.logoData = await layer.logo.arrayBuffer()
+            base.logoName = layer.logo.name
+          } catch (e) {
+            console.error('[handleProcess] could not read watermark logo:', layer.logo.name, e)
+            toast.error(`Could not read logo "${layer.logo.name}" — please re-select it.`)
+          }
+        }
+        wmLayers.push(base)
+      }
+      runOptions = { ...options, layers: wmLayers }
     } else if (isConvertImages) {
       // Convert Images: every file is processed, per-file, each with its own
       // target format chosen in the interactive view.
@@ -658,7 +689,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept={isConvertImages || isFaviconGenerator ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
+          accept={isConvertImages || isFaviconGenerator || isWatermarkImages ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -727,6 +758,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           />
         ) : isFaviconGenerator && files.length > 0 ? (
           <FaviconGeneratorView
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isWatermarkImages && files.length > 0 ? (
+          <WatermarkImagesView
             files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}

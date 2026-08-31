@@ -688,3 +688,21 @@ Work Log:
 
 Stage Summary:
 - Favicon Generator now outputs a complete favicon package per image (multi-size .ico + one PNG per selected size), closing the "where are the other files" gap; drop-added files are byte-snapshotted at drop time and every tool's input read is failure-proof, so the NotFoundError class of crash is eliminated app-wide.
+
+---
+Task ID: 8
+Agent: Super Z (main agent)
+Task: Add "Watermark Image" tool (user request, inspired by iloveimg.com) — text + logo watermark layers on any image, batch, per-file + ZIP download.
+
+Work Log:
+- Registry: `watermark-images` entry in `src/lib/tools.ts` (name "Watermark Image", icon Stamp, category image, accent rose, batch, step 7, NOT locked); ProcessorType + toolProcessors mapping added.
+- Worker (`worker-source.ts`): top-level `drawWatermarkLayer(ctx, W, H, L, logoBmp)` helper — contain-exact text/logo stamping with auto size (min(w,h)/8) or explicit px, font family, color, opacity, rotation (rotated bounding box for placement/tiling), single 9-grid placement with X/Y margins or tile-across-image mode. `processors['watermark-images']`: decodes logos ONCE per run, partitions layers into behind-image / over-image, draws behind layers -> base image (JPEG flattened onto white first) -> over layers; output KEEPS source format (jpg/jpeg -> image/jpeg, webp -> image/webp, everything else -> png), name `<base>-watermarked.<ext>`, note "<w>x<h> px · N watermarks".
+- Fixed a self-inflicted slip during the edit (stray bogus createImageBitmap fragment) immediately after noticing it in the edit diff.
+- View `src/components/tools/watermark-images-view.tsx`: layer stack editor — "Add text" / "Add logo" buttons, per-layer cards (text input, font select 6 families, native color picker, auto-size switch + slider, logo picker with thumbnail, scale slider 5-100% of image width, opacity/rotation sliders, tile switch + 3x3 placement grid, H/V margin sliders, Over/Behind segmented control, remove button); LIVE PREVIEW canvas of the first image at natural resolution mirroring the worker math exactly (checkerboard backdrop for transparency, JPEG white-flatten parity); per-file rows; emits `WatermarkImagesResult { layers }` (null when no layers -> Run disabled). Logo object URLs revoked on replace/unmount; ref-sync moved into an effect after lint caught render-phase ref write.
+- tool-page wiring: input config (image/*), INTERACTIVE_TOOLS, result union, isWatermarkImages branch in handleProcess (readInput per file; image layers stripped to plain data with logoData/logoName ArrayBuffer bytes, logo read failures -> toast), render branch, add-more accept image/*.
+- E2E (agent-browser): 3 images uploaded; text layer "ToolForge" + logo layer (test-checker.png) -> preview painted (bottom-right 1650/1650 px); Run -> 3/3 complete, notes "1200x800 px · 2 watermarks" etc.; Download All zip captured and parsed: test-photo-watermarked.jpg (JPEG magic, 1200x800), test-checker-watermarked.png (PNG magic, 640x480), test-webp-watermarked.webp (RIFF/WEBP) — all re-decoded via createImageBitmap at EXACT source dims (format + size preservation verified).
+- Placement proof by pixel-diff: switching text color red->green changed exactly 10,014 px, all inside [741,689 -> 1179,782] = bottom-right corner (16px margins); tile ON diff: 158,962 px spanning [18,21 -> 1199,782] = full-canvas tiling. Rotation/opacity share the same stamp() path.
+- Regression: favicon-generator re-run -> 7 outputs ready, zero page errors. `bun run lint` clean; dev.log clean.
+
+Stage Summary:
+- ToolForge now ships 26 tools / 19 implemented. Watermark Image live: stacked text+logo layers, live preview (exact worker parity), tile/9-grid placement, margins, rotation, opacity, over/behind layering, source format preservation, batch + ZIP. Lock policy intact: no lock flag set on this tool (only user-commanded locks).

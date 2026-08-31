@@ -2208,6 +2208,135 @@ processors['favicon-generator'] = async function (inputs, opts, onProgress, log)
   return out;
 };
 
+/* ---- Watermark layer drawing (shared by watermark-images) ---------------- */
+/* Mirrors the live-preview renderer in watermark-images-view.tsx — keep the */
+/* two in sync (same coordinates, opacity, rotation and tiling math).        */
+/* L: { type:'text'|'image', text, fontFamily, fontSizePx (0=auto), color,   */
+/*      opacity 0..1, rotation deg, tile bool, position, marginX, marginY,   */
+/*      scale (% of image width, image layers), logoBmp (decoded bitmap) }   */
+function drawWatermarkLayer(ctx, W, H, L, logoBmp) {
+  var tw, th, text = '';
+  if (L.type === 'text') {
+    text = L.text || '';
+    if (!text) return;
+    var size = L.fontSizePx > 0 ? L.fontSizePx : Math.max(12, Math.round(Math.min(W, H) / 8));
+    ctx.font = size + 'px ' + (L.fontFamily || 'sans-serif');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    tw = ctx.measureText(text).width;
+    th = size;
+  } else {
+    if (!logoBmp) return;
+    var scale = Math.max(1, Math.min(100, L.scale || 25)) / 100;
+    tw = Math.max(1, Math.round(W * scale));
+    th = Math.max(1, Math.round(logoBmp.height * (tw / logoBmp.width)));
+  }
+  var rad = ((L.rotation || 0) * Math.PI) / 180;
+  var cos = Math.abs(Math.cos(rad));
+  var sin = Math.abs(Math.sin(rad));
+  var bboxW = tw * cos + th * sin;
+  var bboxH = tw * sin + th * cos;
+  var mX = Math.max(0, L.marginX || 0);
+  var mY = Math.max(0, L.marginY || 0);
+  function stamp(cx, cy) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, L.opacity == null ? 0.5 : L.opacity));
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    if (L.type === 'text') {
+      ctx.fillStyle = L.color || '#000000';
+      ctx.fillText(text, 0, 0);
+    } else {
+      ctx.drawImage(logoBmp, -tw / 2, -th / 2, tw, th);
+    }
+    ctx.restore();
+  }
+  if (L.tile) {
+    var stepX = bboxW + mX * 2;
+    var stepY = bboxH + mY * 2;
+    for (var yy = -stepY; yy < H + stepY; yy += stepY) {
+      for (var xx = -stepX; xx < W + stepX; xx += stepX) {
+        stamp(xx + stepX / 2, yy + stepY / 2);
+      }
+    }
+  } else {
+    var pos = L.position || 'bottom-right';
+    var cx2 = pos.indexOf('left') >= 0 ? mX + bboxW / 2 : pos.indexOf('right') >= 0 ? W - mX - bboxW / 2 : W / 2;
+    var cy2 = pos.indexOf('top') >= 0 ? mY + bboxH / 2 : pos.indexOf('bottom') >= 0 ? H - mY - bboxH / 2 : H / 2;
+    stamp(cx2, cy2);
+  }
+}
+
+processors['watermark-images'] = async function (inputs, opts, onProgress, log) {
+  var layers = (opts && opts.layers) || [];
+  /* Decode logo bitmaps once — they are reused for every input image. */
+  var prepared = [];
+  for (var li = 0; li < layers.length; li++) {
+    var L0 = layers[li];
+    var logoBmp = null;
+    if (L0.type === 'image' && L0.logoData) {
+      var lblob = new Blob([L0.logoData], { type: guessMime(L0.logoName || 'logo.png') });
+      try {
+        logoBmp = await createImageBitmap(lblob, { imageOrientation: 'from-image' });
+      } catch (e) {
+        log('Could not decode watermark logo — skipping that layer');
+      }
+    }
+    prepared.push({ L: L0, logo: logoBmp });
+  }
+  var under = prepared.filter(function (p) { return p.L.over === false; });
+  var over = prepared.filter(function (p) { return p.L.over !== false; });
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    log('Watermarking ' + input.fileName);
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error('Could not decode ' + input.fileName + ' — this browser cannot read that image format.');
+    }
+    var w = bmp.width;
+    var h = bmp.height;
+    var lower = (input.fileName || '').toLowerCase();
+    var isJpg = /\.jpe?g$/.test(lower);
+    var isWebp = /\.webp$/.test(lower);
+    var mime = isJpg ? 'image/jpeg' : isWebp ? 'image/webp' : 'image/png';
+    var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
+    var canvas = new OffscreenCanvas(w, h);
+    var ctx = canvas.getContext('2d');
+    if (mime === 'image/jpeg') {
+      /* JPEG has no alpha — flatten onto white first. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+    /* "Behind image" layers first, then the image itself, then "over". */
+    for (var u = 0; u < under.length; u++) {
+      drawWatermarkLayer(ctx, w, h, under[u].L, under[u].logo);
+    }
+    ctx.globalAlpha = 1;
+    ctx.drawImage(bmp, 0, 0);
+    for (var o = 0; o < over.length; o++) {
+      drawWatermarkLayer(ctx, w, h, over[o].L, over[o].logo);
+    }
+    ctx.globalAlpha = 1;
+    if (bmp.close) bmp.close();
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });
+    var buf = await outBlob.arrayBuffer();
+    var layerCount = under.length + over.length;
+    out.push({
+      name: stripExt(input.fileName) + '-watermarked.' + ext,
+      data: buf,
+      mime: mime,
+      note: w + 'x' + h + ' px · ' + layerCount + ' watermark' + (layerCount > 1 ? 's' : ''),
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;
