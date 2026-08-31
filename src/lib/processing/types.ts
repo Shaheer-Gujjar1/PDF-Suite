@@ -38,6 +38,7 @@ export type ProcessorType =
   | 'convert-images'
   | 'favicon-generator'
   | 'watermark-images'
+  | 'rotate-images'
 
 export interface ProcessInput {
   id: string

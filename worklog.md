@@ -723,3 +723,21 @@ Work Log:
 
 Stage Summary:
 - Watermark Image is now a true visual editor: what-you-see-is-what-you-get canvas with floating layer management, per-layer sidebar editing that updates the preview on every keystroke/slider drag, film-strip image switching, and verified live z-order/placement/color feedback. Worker math unchanged (preview parity byte-exact).
+
+---
+Task ID: 10
+Agent: Super Z (main agent)
+Task: User command — (1) flag Watermark Image + Crop Images as perfect (locked); (2) add new "Rotate Image" tool.
+
+Work Log:
+- Lock flags: `watermark-images` set `locked: true` in `src/lib/tools.ts` (user-commanded; crop-images was already locked). Homepage pill audit via agent-browser: 12 pills total, Watermark Image + Crop Images present, Convert Images / Favicon Generator / Rotate Image correctly unpilled.
+- New tool "Rotate Image" (`rotate-images`, category image, icon RotateCw, accent orange, batch, step 7, NO lock flag): registry entry + ProcessorType `'rotate-images'` + toolProcessors mapping.
+- Worker `processors['rotate-images']`: per-file `{ angle: 0|90|180|270, flipH, flipV }` keyed by fileName; angles normalized/validated to quarter turns; canvas = translate→rotate→scale(flip)→draw-centred so flips apply in IMAGE space then rotate (matches preview transform `rotate(a) scaleX(±1) scaleY(±1)` exactly); 90/270 swap W/H with zero resampling; source format preserved (jpg→jpeg, webp→webp, else png; JPEG white-flatten); output `<base>-rotated.<ext>`, note "<w>x<h> px · <ops>".
+- View `rotate-images-view.tsx`: global "Rotation settings" card (rotate-all left/right, flip-all H/V relative toggles, reset-all) + per-file rows with LIVE-rotated thumbnails (CSS transform = worker math), per-row ⟲/⟳/flipH/flipV/reset/remove buttons, dimension-swap readout ("1200×800 → 800×1200 px · 90°" / "no change"), add-more tile, privacy hint. New images default 90° clockwise so Run always produces a visible change; emits `RotateImagesResult { rotations }` keyed by fileName (null when empty).
+- tool-page wiring: image/* input config, INTERACTIVE_TOOLS, result-union + isRotateImages flag, handleProcess branch (readInput per file, `rotations` via runOptions), add-more accept, render branch. `hasOptions` untouched (no generic panel for image tools).
+- E2E (agent-browser, real Playwright uploads): 3 images (jpg 1200×800, png 640×480, webp 800×600) → default rows show dim-swap text at 90°; per-file transforms set (checker→180°, webp→0°+flipH); Run → 3 of 3 complete, notes "800x1200 px · 90°", "640x480 px · 180°", "800x600 px · flip H". Download-All ZIP captured as bytes (hook stores ArrayBuffer; blob URLs get revoked post-download) and parsed in-page: 3 entries `*-rotated.*` with correct magic (JPEG/PNG/WEBP) + exact dims. PIXEL PROOF: checker 180° = 0/300 mismatches vs point-symmetry mapping (lossless proven); webp flipH = 0/120 mismatches >12 (max Δ11, lossy noise); photo 90°CW = 0/120 mismatches >14 (max Δ1). Per-item Download → image/png 11,144 B (= ZIP entry size). Global rotate-all-left: 90→0, 180→90, 0+flipH→270+flipH (flip preserved). Zero page errors.
+- Regression: Watermark Image page + view still render; `bun run lint` clean; dev.log 0 errors.
+- Note (E2E quirk): fetch()-based file injection from the page queues dev-server 404 HTML as fake files (all rows showed identical 24.2 KB, no dims) — always use `agent-browser upload` (Playwright setInputFiles) for local files.
+
+Stage Summary:
+- ToolForge now ships 27 tools / 20 implemented. Rotate Image live: lossless quarter-turn rotation + H/V flips, live per-file thumbnails, global batch controls, source-format preservation, per-file + ZIP download. Watermark Image and Crop Images are production-locked (user-commanded); new tools stay unlocked by default.

@@ -2051,6 +2051,78 @@ processors['convert-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Rotate Images (lossless quarter turns + flips) ---------------------- */
+/* opts.rotations: { [fileName]: { angle: 0|90|180|270, flipH, flipV } }.     */
+/* Exact 90° multiples swap W/H with NO resampling — every pixel stays       */
+/* sharp. Flips are applied in image space, then the image is rotated.       */
+/* Output preserves the source format (jpg -> jpeg, webp -> webp, else png,  */
+/* JPEG flattened onto white).                                                */
+processors['rotate-images'] = async function (inputs, opts, onProgress, log) {
+  var rotations = (opts && opts.rotations) || {};
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var cfg = rotations[input.fileName] || {};
+    var angle = ((Math.round(Number(cfg.angle) || 0) % 360) + 360) % 360;
+    if (angle !== 0 && angle !== 90 && angle !== 180 && angle !== 270) angle = 90;
+    var flipH = !!cfg.flipH;
+    var flipV = !!cfg.flipV;
+    var ops = [];
+    if (angle !== 0) ops.push(angle + '°');
+    if (flipH) ops.push('flip H');
+    if (flipV) ops.push('flip V');
+    log('Rotating ' + input.fileName + (ops.length ? ' (' + ops.join(' · ') + ')' : ' (no change)'));
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var swap = angle === 90 || angle === 270;
+    var w = swap ? bmp.height : bmp.width;
+    var h = swap ? bmp.width : bmp.height;
+    var lower = (input.fileName || '').toLowerCase();
+    var isJpg = /\.jpe?g$/.test(lower);
+    var isWebp = /\.webp$/.test(lower);
+    var mime = isJpg ? 'image/jpeg' : isWebp ? 'image/webp' : 'image/png';
+    var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
+    var canvas = new OffscreenCanvas(w, h);
+    var ctx = canvas.getContext('2d');
+    if (mime === 'image/jpeg') {
+      /* JPEG has no alpha — flatten onto white first. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.save();
+    /* Translate to centre -> rotate -> flip -> draw centred. The scale      */
+    /* (flip) lands closest to the draw call, so it flips in IMAGE space,    */
+    /* then the flipped image is rotated — matching the live preview.        */
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate((angle * Math.PI) / 180);
+    ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+    ctx.restore();
+    if (bmp.close) bmp.close();
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });
+    if (outBlob.type && outBlob.type !== mime) {
+      throw new Error('This browser cannot encode ' + mime + ' images.');
+    }
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '-rotated.' + ext,
+      data: buf,
+      mime: mime,
+      note: w + 'x' + h + ' px · ' + (ops.length ? ops.join(' · ') : 'no change'),
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 /* ---- ICO encoding helpers (favicon generator) --------------------------- */
 
 /* Encode an ImageData (RGBA, top-down) as a 32-bit ICO DIB:

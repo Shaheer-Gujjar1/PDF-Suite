@@ -162,6 +162,19 @@ export const tools: Tool[] = [
     accent: "rose",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+
+  {
+    id: "rotate-images",
+    name: "Rotate Image",
+    description:
+      "Rotate any image — JPG, PNG, WEBP, GIF, BMP and more — in exact lossless 90° steps, plus horizontal/vertical flips. Batch ready; download each or all as ZIP.",
+    category: "image",
+    icon: RotateCw,
+    accent: "orange",
+    batch: true,
+    step: 7,
   },
 
   // ---------- Organize ----------
