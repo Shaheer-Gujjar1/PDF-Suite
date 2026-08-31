@@ -706,3 +706,20 @@ Work Log:
 
 Stage Summary:
 - ToolForge now ships 26 tools / 19 implemented. Watermark Image live: stacked text+logo layers, live preview (exact worker parity), tile/9-grid placement, margins, rotation, opacity, over/behind layering, source format preservation, batch + ZIP. Lock policy intact: no lock flag set on this tool (only user-commanded locks).
+
+---
+Task ID: 9
+Agent: Super Z (main agent)
+Task: Rebuild Watermark Image UI into an iloveimg-style visual live editing studio (user: "whatever am adding or editing, how can i get to know it? i need a visual live editing system like this" + reference screenshot of iloveimg's editor).
+
+Work Log:
+- Reference analyzed (upload/pasted_image_1788183773035.png): large canvas preview, floating layer toolbar (reorder arrows + layer dropdown) above the image, floating + add button on the canvas edge with layer-count badge, settings sidebar with ADD IMAGE / ADD TEXT and the selected layer's controls.
+- Rewrote `watermark-images-view.tsx` main layout into a 2-column studio: LEFT = big live canvas (max-h 560px, checkerboard backdrop) + floating toolbar + FAB (+ menu: Text/Image watermark) + queued-images film strip (click to switch preview, hover-X to remove, dashed add tile); RIGHT = "Watermark layers" card (add buttons + selectable layer list with per-layer delete) + editor for the ACTIVE layer only + "Editing live" pulse hint.
+- New state: activeLayerId (auto-selects newly added layer; self-heals on delete) + activeImageId (film strip; self-heals on file removal). Reorder arrows move the active layer one step in the draw stack (up = on top); labels re-index live ("Text 2 · ToolForge", "Logo 1 · test-webp").
+- Perf fix: preview logo object URLs were being revoked/recreated on EVERY layer edit (flicker while typing) — logo loading now keyed by a stable logoKey (id:name:size) via layersRef, so keystrokes only re-run the cheap canvas redraw.
+- LayerCard compacted for the 360px sidebar (single-column stacks, tighter sliders, inline 3x3 placement grid + hint text).
+- E2E (agent-browser): canvas at natural 1200x800 on load; text layer added -> typed -> color-swap pixel diff proved LIVE redraw (15,041 px changed inside the placement box); FAB menu -> logo layer auto-selected -> sidebar switched to logo editor; logo attached -> dropdown label updated + logo pixels verified on canvas (7,627 beige px in region); send-backward reorder -> green text (now on top) became visible through the logo region (666 px) proving z-order; film strip switched preview 1200x800 -> 640x480; Run -> 2/2 complete, ZIP outputs re-decoded at exact source dims (1200x800 jpg, 640x480 png); zero page errors. `bun run lint` clean.
+- Screenshots: .zscripts/verify/watermark-3-studio.png (studio layout), watermark-1/2 (previous layout tests).
+
+Stage Summary:
+- Watermark Image is now a true visual editor: what-you-see-is-what-you-get canvas with floating layer management, per-layer sidebar editing that updates the preview on every keystroke/slider drag, film-strip image switching, and verified live z-order/placement/color feedback. Worker math unchanged (preview parity byte-exact).

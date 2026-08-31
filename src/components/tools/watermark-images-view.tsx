@@ -2,8 +2,11 @@
 
 import * as React from 'react'
 import {
+  ArrowDown,
+  ArrowUp,
   ImagePlus,
   Loader2,
+  Plus,
   Stamp as StampIcon,
   Trash2,
   Type as TypeIcon,
@@ -98,6 +101,14 @@ const POSITIONS: WmPosition[] = [
   'bottom-right',
 ]
 
+/** Checkerboard backdrop so transparent PNG/WEBP areas are visible. */
+const CHECKER_BG: React.CSSProperties = {
+  backgroundImage:
+    'linear-gradient(45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(-45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(128,128,128,0.14) 75%), linear-gradient(-45deg, transparent 75%, rgba(128,128,128,0.14) 75%)',
+  backgroundSize: '16px 16px',
+  backgroundPosition: '0 0, 0 8px, 8px -8px, -8px 0px',
+}
+
 let counter = 0
 function uid(): string {
   counter += 1
@@ -153,6 +164,14 @@ function WatermarkPreview({
   const [baseImg, setBaseImg] = React.useState<HTMLImageElement | null>(null)
   const [logoImgs, setLogoImgs] = React.useState<Record<string, HTMLImageElement>>({})
 
+  /* Ref mirror so the logo effect below doesn't need `layers` as a dep —
+     otherwise every keystroke would revoke + recreate the logo object URLs
+     and make the logo flicker while typing. */
+  const layersRef = React.useRef(layers)
+  React.useEffect(() => {
+    layersRef.current = layers
+  }, [layers])
+
   React.useEffect(() => {
     const url = URL.createObjectURL(file)
     const img = new Image()
@@ -165,12 +184,18 @@ function WatermarkPreview({
     }
   }, [file])
 
+  /* Reload logos ONLY when the actual set of logo files changes. */
+  const logoKey = layers
+    .map((l) => (l.type === 'image' && l.logo ? `${l.id}:${l.logo.name}:${l.logo.size}` : ''))
+    .join('|')
+
   React.useEffect(() => {
+    const current = layersRef.current
     setLogoImgs({})
-    if (layers.every((l) => l.type !== 'image' || !l.logo)) return
+    if (current.every((l) => l.type !== 'image' || !l.logo)) return
     let alive = true
     const urls: string[] = []
-    for (const l of layers) {
+    for (const l of current) {
       if (l.type !== 'image' || !l.logo) continue
       const url = URL.createObjectURL(l.logo)
       urls.push(url)
@@ -184,7 +209,7 @@ function WatermarkPreview({
       alive = false
       for (const u of urls) URL.revokeObjectURL(u)
     }
-  }, [layers])
+  }, [logoKey])
 
   React.useEffect(() => {
     const canvas = canvasRef.current
@@ -276,18 +301,16 @@ function WatermarkPreview({
 
   return (
     <div
-      className="overflow-hidden rounded-xl border border-border/60"
-      style={{
-        backgroundImage:
-          'linear-gradient(45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(-45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(128,128,128,0.14) 75%), linear-gradient(-45deg, transparent 75%, rgba(128,128,128,0.14) 75%)',
-        backgroundSize: '16px 16px',
-        backgroundPosition: '0 0, 0 8px, 8px -8px, -8px 0px',
-      }}
+      className="overflow-hidden rounded-2xl border border-border/60"
+      style={CHECKER_BG}
     >
       {baseImg ? (
-        <canvas ref={canvasRef} className="mx-auto block h-auto max-h-[340px] w-auto max-w-full" />
+        <canvas
+          ref={canvasRef}
+          className="mx-auto block h-auto max-h-[560px] w-auto max-w-full"
+        />
       ) : (
-        <div className="grid h-40 place-items-center">
+        <div className="grid h-64 place-items-center">
           <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
         </div>
       )}
@@ -296,7 +319,7 @@ function WatermarkPreview({
 }
 
 /* ------------------------------------------------------------------------ */
-/* Single watermark layer editor                                             */
+/* Single watermark layer editor (rendered for the ACTIVE layer only)        */
 /* ------------------------------------------------------------------------ */
 function LayerCard({
   layer,
@@ -335,7 +358,7 @@ function LayerCard({
 
       {/* Type-specific controls */}
       {isText ? (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-4">
           <div className="space-y-2">
             <Label className="text-xs font-medium text-muted-foreground">Text</Label>
             <Input
@@ -375,7 +398,7 @@ function LayerCard({
               />
             </div>
           </div>
-          <div className="space-y-2 sm:col-span-2">
+          <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label className="text-xs font-medium text-muted-foreground">
                 Size {layer.fontSizePx > 0 ? `· ${layer.fontSizePx} px` : '· auto-fit'}
@@ -401,7 +424,7 @@ function LayerCard({
           </div>
         </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-4">
           <div className="space-y-2">
             <Label className="text-xs font-medium text-muted-foreground">Logo image</Label>
             <div className="flex items-center gap-3">
@@ -451,37 +474,37 @@ function LayerCard({
       )}
 
       {/* Shared controls */}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">
-            Opacity · {Math.round(layer.opacity * 100)}%
-          </Label>
-          <Slider
-            value={[Math.round(layer.opacity * 100)]}
-            min={5}
-            max={100}
-            step={1}
-            onValueChange={(v) => onChange({ opacity: v[0] / 100 })}
-            aria-label="Watermark opacity"
-          />
+      <div className="mt-4 space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label className="text-xs font-medium text-muted-foreground">
+              Opacity · {Math.round(layer.opacity * 100)}%
+            </Label>
+            <Slider
+              value={[Math.round(layer.opacity * 100)]}
+              min={5}
+              max={100}
+              step={1}
+              onValueChange={(v) => onChange({ opacity: v[0] / 100 })}
+              aria-label="Watermark opacity"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-xs font-medium text-muted-foreground">
+              Rotation · {layer.rotation}°
+            </Label>
+            <Slider
+              value={[layer.rotation]}
+              min={-180}
+              max={180}
+              step={1}
+              onValueChange={(v) => onChange({ rotation: v[0] })}
+              aria-label="Watermark rotation"
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">
-            Rotation · {layer.rotation}°
-          </Label>
-          <Slider
-            value={[layer.rotation]}
-            min={-180}
-            max={180}
-            step={1}
-            onValueChange={(v) => onChange({ rotation: v[0] })}
-            aria-label="Watermark rotation"
-          />
-        </div>
-      </div>
 
-      {/* Placement */}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        {/* Placement */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <Label className="text-xs font-medium text-muted-foreground">
@@ -493,61 +516,64 @@ function LayerCard({
               aria-label="Tile the watermark across the whole image"
             />
           </div>
-          <p className="text-[11px] leading-snug text-muted-foreground">
-            {layer.tile
-              ? 'Repeats over the whole image — margins set the gap.'
-              : 'Place once, then pick a spot on the right.'}
-          </p>
-        </div>
-        <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">Placement</Label>
-          <div className="grid w-[96px] grid-cols-3 gap-1" role="group" aria-label="Watermark placement">
-            {POSITIONS.map((p) => (
-              <button
-                key={p}
-                type="button"
-                disabled={layer.tile}
-                onClick={() => onChange({ position: p })}
-                aria-label={`Place watermark ${p.replace('-', ' ')}`}
-                aria-pressed={!layer.tile && layer.position === p}
-                className={cn(
-                  'h-7 w-7 rounded-md border border-border transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-                  !layer.tile && layer.position === p
-                    ? 'bg-primary text-primary-foreground'
-                    : 'bg-secondary/60 hover:bg-secondary'
-                )}
-              />
-            ))}
+          <div className="flex items-center gap-3">
+            <div className="grid w-[78px] shrink-0 grid-cols-3 gap-1" role="group" aria-label="Watermark placement">
+              {POSITIONS.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  disabled={layer.tile}
+                  onClick={() => onChange({ position: p })}
+                  aria-label={`Place watermark ${p.replace('-', ' ')}`}
+                  aria-pressed={!layer.tile && layer.position === p}
+                  className={cn(
+                    'h-6 w-6 rounded-md border border-border transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                    !layer.tile && layer.position === p
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary/60 hover:bg-secondary'
+                  )}
+                />
+              ))}
+            </div>
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              {layer.tile
+                ? 'Repeats over the whole image — margins set the gap between stamps.'
+                : 'Pick one of the 9 spots — margins push it away from the edges.'}
+            </p>
           </div>
         </div>
-      </div>
 
-      {/* Margins + layering */}
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">
-            Horizontal margin · {layer.marginX} px
-          </Label>
-          <Slider
-            value={[layer.marginX]}
-            min={0}
-            max={100}
-            step={1}
-            onValueChange={(v) => onChange({ marginX: v[0] })}
-            aria-label="Horizontal margin"
-          />
-          <Label className="pt-1 text-xs font-medium text-muted-foreground">
-            Vertical margin · {layer.marginY} px
-          </Label>
-          <Slider
-            value={[layer.marginY]}
-            min={0}
-            max={100}
-            step={1}
-            onValueChange={(v) => onChange({ marginY: v[0] })}
-            aria-label="Vertical margin"
-          />
+        {/* Margins */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-2">
+            <Label className="text-xs font-medium text-muted-foreground">
+              H-margin · {layer.marginX}
+            </Label>
+            <Slider
+              value={[layer.marginX]}
+              min={0}
+              max={100}
+              step={1}
+              onValueChange={(v) => onChange({ marginX: v[0] })}
+              aria-label="Horizontal margin"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-xs font-medium text-muted-foreground">
+              V-margin · {layer.marginY}
+            </Label>
+            <Slider
+              value={[layer.marginY]}
+              min={0}
+              max={100}
+              step={1}
+              onValueChange={(v) => onChange({ marginY: v[0] })}
+              aria-label="Vertical margin"
+            />
+          </div>
         </div>
+
+        {/* Layering */}
         <div className="space-y-2">
           <Label className="text-xs font-medium text-muted-foreground">Layering</Label>
           <div className="inline-flex rounded-lg border border-border p-0.5">
@@ -588,7 +614,7 @@ function LayerCard({
 }
 
 /* ------------------------------------------------------------------------ */
-/* Main view                                                                 */
+/* Main view — iloveimg-style visual editing studio                          */
 /* ------------------------------------------------------------------------ */
 export function WatermarkImagesView({
   files,
@@ -598,6 +624,9 @@ export function WatermarkImagesView({
 }: WatermarkImagesViewProps) {
   const [meta, setMeta] = React.useState<Record<string, ImageMeta>>({})
   const [layers, setLayers] = React.useState<WatermarkLayerState[]>([])
+  const [activeLayerId, setActiveLayerId] = React.useState<string | null>(null)
+  const [activeImageId, setActiveImageId] = React.useState<string | null>(null)
+  const [addOpen, setAddOpen] = React.useState(false)
   const urlsRef = React.useRef<Record<string, string>>({})
 
   /* Revoke logo object URLs on unmount. */
@@ -677,6 +706,31 @@ export function WatermarkImagesView({
     onChange({ layers })
   }, [files, layers, onChange])
 
+  /* Keep the previewed image valid as the queue changes. */
+  React.useEffect(() => {
+    if (files.length === 0) {
+      setActiveImageId(null)
+      return
+    }
+    setActiveImageId((prev) =>
+      prev && files.some((f) => f.id === prev) ? prev : files[0].id
+    )
+  }, [files])
+
+  /* Keep the active layer valid as layers come and go. */
+  React.useEffect(() => {
+    if (layers.length === 0) {
+      setActiveLayerId(null)
+      return
+    }
+    setActiveLayerId((prev) =>
+      prev && layers.some((l) => l.id === prev) ? prev : layers[layers.length - 1].id
+    )
+  }, [layers])
+
+  const activeFile = files.find((f) => f.id === activeImageId) ?? files[0] ?? null
+  const activeLayer = layers.find((l) => l.id === activeLayerId) ?? null
+
   const patchLayer = (id: string, patch: Partial<WatermarkLayerState>) =>
     setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)))
 
@@ -687,141 +741,302 @@ export function WatermarkImagesView({
       return prev.filter((l) => l.id !== id)
     })
 
+  const addLayer = (type: 'text' | 'image') => {
+    const layer = type === 'text' ? makeTextLayer() : makeLogoLayer()
+    setLayers((prev) => [...prev, layer])
+    setActiveLayerId(layer.id)
+  }
+
+  /* dir +1 = one step towards the top of the visual stack (drawn later). */
+  const moveLayer = (id: string, dir: -1 | 1) =>
+    setLayers((prev) => {
+      const i = prev.findIndex((l) => l.id === id)
+      const j = i + dir
+      if (i < 0 || j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
+
+  const layerLabel = (l: WatermarkLayerState, i: number) =>
+    l.type === 'text'
+      ? `Text ${i + 1} · ${l.text.trim().slice(0, 16) || 'empty'}`
+      : `Logo ${i + 1} · ${(l.logo?.name || 'no file').replace(/\.[^.]+$/, '').slice(0, 16)}`
+
   return (
     <div className="space-y-4">
-      {/* Watermark layers */}
-      <div className="rounded-2xl border border-border/70 bg-secondary/40 p-4 sm:p-5">
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary/10 text-primary">
-            <StampIcon className="h-4 w-4" />
-          </span>
-          <p className="flex-1 text-sm font-medium">Watermark layers</p>
-          <button
-            type="button"
-            onClick={() => setLayers((prev) => [...prev, makeTextLayer()])}
-            className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-          >
-            <TypeIcon className="h-3.5 w-3.5" />
-            Add text
-          </button>
-          <button
-            type="button"
-            onClick={() => setLayers((prev) => [...prev, makeLogoLayer()])}
-            className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-3 py-1.5 text-xs font-medium text-secondary-foreground transition-colors hover:bg-secondary/70"
-          >
-            <StampIcon className="h-3.5 w-3.5" />
-            Add logo
-          </button>
-        </div>
-
-        {layers.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-card/60 p-6 text-center">
-            <StampIcon className="mx-auto mb-2 h-5 w-5 text-muted-foreground" />
-            <p className="text-sm font-medium">No watermarks yet</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Add a text or logo watermark — stack as many as you like. They
-              apply to every queued image.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {layers.map((l, i) => (
-              <LayerCard
-                key={l.id}
-                layer={l}
-                index={i}
-                onChange={(patch) => patchLayer(l.id, patch)}
-                onRemove={() => removeLayer(l.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Live preview */}
-      {files.length > 0 && layers.length > 0 && (
-        <div>
-          <p className="mb-2 text-xs font-medium text-muted-foreground">
-            Live preview — first image, scaled to fit. Output keeps full
-            resolution.
-          </p>
-          <WatermarkPreview file={files[0].file} layers={layers} />
-        </div>
-      )}
-
-      {/* Per-image list */}
-      <div>
-        <p className="mb-2 text-xs font-medium text-muted-foreground">
-          Queued images — every watermark layer is applied to each one:
-        </p>
-        <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
-          {files.map((f) => {
-            const m = meta[f.id]
-            return (
-              <div
-                key={f.id}
-                className="flex items-center gap-3 rounded-xl border border-border/70 bg-card p-2.5"
-              >
-                {m ? (
-                  <img
-                    src={m.url}
-                    alt={f.file.name}
-                    className="h-14 w-14 shrink-0 rounded-lg border border-border/60 bg-muted object-cover"
-                    draggable={false}
-                  />
-                ) : (
-                  <div className="grid h-14 w-14 shrink-0 place-items-center rounded-lg border border-border/60 bg-muted">
-                    <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{f.file.name}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {formatBytes(f.file.size)}
-                    {m && m.width > 1 ? ` · ${m.width}×${m.height} px` : ''}
-                    {' · '}
-                    <span className="font-medium text-primary">
-                      +{layers.length} watermark{layers.length > 1 ? 's' : ''}
-                    </span>
-                  </p>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+        {/* ------------------------- Canvas column ------------------------- */}
+        <div className="space-y-3">
+          <div className="relative">
+            {/* Floating layer toolbar (switch + reorder) */}
+            {layers.length > 0 && (
+              <div className="absolute left-1/2 top-3 z-20 -translate-x-1/2">
+                <div className="flex items-center gap-1 rounded-xl border border-border/70 bg-card/95 p-1 shadow-lg backdrop-blur">
+                  <button
+                    type="button"
+                    onClick={() => activeLayer && moveLayer(activeLayer.id, 1)}
+                    disabled={!activeLayer || layers.indexOf(activeLayer) === layers.length - 1}
+                    className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Bring layer forward (moves it on top)"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => activeLayer && moveLayer(activeLayer.id, -1)}
+                    disabled={!activeLayer || layers.indexOf(activeLayer) === 0}
+                    className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
+                    aria-label="Send layer backward (moves it underneath)"
+                  >
+                    <ArrowDown className="h-4 w-4" />
+                  </button>
+                  <Select
+                    value={activeLayerId ?? undefined}
+                    onValueChange={(v) => setActiveLayerId(v)}
+                  >
+                    <SelectTrigger
+                      className="h-8 w-[200px] sm:w-[250px]"
+                      aria-label="Active watermark layer"
+                    >
+                      <SelectValue placeholder="Pick a layer…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {layers.map((l, i) => (
+                        <SelectItem key={l.id} value={l.id}>
+                          {layerLabel(l, i)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => onRemove(f.id)}
-                  className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-                  aria-label={`Remove ${f.file.name}`}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
               </div>
-            )
-          })}
+            )}
+
+            {/* Live canvas */}
+            {activeFile ? (
+              <WatermarkPreview file={activeFile.file} layers={layers} />
+            ) : (
+              <div
+                className="grid h-64 place-items-center rounded-2xl border border-border/60 text-sm text-muted-foreground"
+                style={CHECKER_BG}
+              >
+                No image selected
+              </div>
+            )}
+
+            {/* Floating add-layer button */}
+            <div className="absolute right-4 top-1/2 z-20 -translate-y-1/2">
+              {addOpen && (
+                <div
+                  className="fixed inset-0 z-10"
+                  onClick={() => setAddOpen(false)}
+                  aria-hidden
+                />
+              )}
+              {addOpen && (
+                <div className="absolute bottom-14 right-0 z-20 w-48 overflow-hidden rounded-xl border border-border/70 bg-card shadow-xl">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      addLayer('text')
+                      setAddOpen(false)
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-sm transition-colors hover:bg-secondary"
+                  >
+                    <TypeIcon className="h-4 w-4 text-primary" />
+                    Text watermark
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      addLayer('image')
+                      setAddOpen(false)
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-sm transition-colors hover:bg-secondary"
+                  >
+                    <StampIcon className="h-4 w-4 text-primary" />
+                    Image watermark
+                  </button>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setAddOpen((o) => !o)}
+                aria-label="Add a watermark layer"
+                aria-expanded={addOpen}
+                className="relative grid h-12 w-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
+              >
+                <Plus className="h-5 w-5" />
+                {layers.length > 0 && (
+                  <span className="absolute -left-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-foreground px-1 text-[10px] font-bold text-background">
+                    {layers.length}
+                  </span>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Queued images film strip */}
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {files.map((f) => {
+              const active = f.id === activeFile?.id
+              const url = meta[f.id]?.url
+              return (
+                <div key={f.id} className="group relative shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveImageId(f.id)}
+                    aria-label={`Preview ${f.file.name}`}
+                    aria-pressed={active}
+                    className={cn(
+                      'block h-14 w-20 overflow-hidden rounded-lg border-2 bg-muted transition-all',
+                      active
+                        ? 'border-primary'
+                        : 'border-transparent opacity-80 hover:opacity-100'
+                    )}
+                  >
+                    {url ? (
+                      <img
+                        src={url}
+                        alt=""
+                        className="h-full w-full object-cover"
+                        draggable={false}
+                      />
+                    ) : (
+                      <Loader2 className="mx-auto mt-5 h-4 w-4 animate-spin text-muted-foreground" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onRemove(f.id)}
+                    aria-label={`Remove ${f.file.name}`}
+                    className="absolute -right-1.5 -top-1.5 hidden h-5 w-5 place-items-center rounded-full bg-destructive text-white shadow group-hover:grid"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )
+            })}
+            <button
+              type="button"
+              onClick={onAddMore}
+              aria-label="Add more images"
+              className="grid h-14 w-20 shrink-0 place-items-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+            >
+              <ImagePlus className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* ------------------------- Sidebar column ------------------------ */}
+        <div className="space-y-3">
+          <div className="rounded-2xl border border-border/70 bg-secondary/40 p-4">
+            <p className="text-sm font-semibold">Watermark layers</p>
+            <div className="mt-3 grid gap-2">
+              <button
+                type="button"
+                onClick={() => addLayer('image')}
+                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+              >
+                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                  <StampIcon className="h-4 w-4" />
+                </span>
+                Add image watermark
+              </button>
+              <button
+                type="button"
+                onClick={() => addLayer('text')}
+                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+              >
+                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                  <TypeIcon className="h-4 w-4" />
+                </span>
+                Add text watermark
+              </button>
+            </div>
+
+            {layers.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {layers.map((l, i) => {
+                  const active = l.id === activeLayerId
+                  return (
+                    <div
+                      key={l.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setActiveLayerId(l.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setActiveLayerId(l.id)
+                        }
+                      }}
+                      className={cn(
+                        'flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors',
+                        active
+                          ? 'border-primary bg-primary/5 text-foreground'
+                          : 'border-border/60 bg-card text-muted-foreground hover:border-primary/40'
+                      )}
+                    >
+                      {l.type === 'text' ? (
+                        <TypeIcon className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <StampIcon className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="min-w-0 flex-1 truncate">{layerLabel(l, i)}</span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          removeLayer(l.id)
+                        }}
+                        aria-label={`Delete ${layerLabel(l, i)}`}
+                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {activeLayer ? (
+            <>
+              <LayerCard
+                layer={activeLayer}
+                index={layers.indexOf(activeLayer)}
+                onChange={(patch) => patchLayer(activeLayer.id, patch)}
+                onRemove={() => removeLayer(activeLayer.id)}
+              />
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                Editing live — every change appears on the canvas instantly.
+              </p>
+            </>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-border bg-card/60 p-5 text-center">
+              <p className="text-sm font-medium">Nothing selected</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Add a text or logo watermark, then select it here to edit —
+                the canvas updates live as you type and drag.
+              </p>
+            </div>
+          )}
         </div>
       </div>
-
-      {/* Add more tile */}
-      <button
-        type="button"
-        onClick={onAddMore}
-        className={cn(
-          'flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border py-3 text-sm font-medium text-muted-foreground transition-colors',
-          'hover:border-primary/50 hover:text-primary'
-        )}
-        aria-label="Add more images"
-      >
-        <ImagePlus className="h-4 w-4" />
-        Add more images
-      </button>
 
       {/* Hint */}
       <div className="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm">
         <StampIcon className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
         <p className="text-muted-foreground">
-          Stamp text, a logo, or both — stack multiple layers and tune font,
-          size, color, opacity, rotation, tiling and margins exactly like you
-          need. Images keep their original size and format (JPG is flattened
-          onto white since it has no transparency). Everything is generated
-          locally; files never leave your device.
+          Pick an image from the film strip, add text or logo layers with the
+          round + button, and edit them live — what you see on the canvas is
+          exactly what gets baked into every downloaded file. Stack as many
+          layers as you like; images keep their original size and format.
+          Everything runs locally; files never leave your device.
         </p>
       </div>
     </div>
