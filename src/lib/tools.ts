@@ -23,6 +23,7 @@ import {
   Combine,
   Repeat,
   Globe,
+  Laugh,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -173,6 +174,18 @@ export const tools: Tool[] = [
     category: "image",
     icon: RotateCw,
     accent: "orange",
+    batch: true,
+    step: 7,
+  },
+
+  {
+    id: "meme-maker",
+    name: "Meme Maker",
+    description:
+      "Caption any image with draggable Impact-style text — classic white fill with black outline, top/bottom white bars, bold/italic/caps and more. Batch ready.",
+    category: "image",
+    icon: Laugh,
+    accent: "violet",
     batch: true,
     step: 7,
   },

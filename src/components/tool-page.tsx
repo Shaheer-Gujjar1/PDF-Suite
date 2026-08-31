@@ -46,6 +46,7 @@ import {
   type WatermarkImagesResult,
 } from '@/components/tools/watermark-images-view'
 import { RotateImagesView, type RotateImagesResult } from '@/components/tools/rotate-images-view'
+import { MemeMakerView, type MemeMakerResult } from '@/components/tools/meme-maker-view'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -82,6 +83,8 @@ function getInput(tool: Tool): InputConfig {
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'rotate-images':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
+    case 'meme-maker':
+      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'images-to-pdf':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF', mode: 'files' }
     case 'word-to-pdf':
@@ -95,7 +98,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'favicon-generator', 'watermark-images', 'rotate-images']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'favicon-generator', 'watermark-images', 'rotate-images', 'meme-maker']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -107,7 +110,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | FaviconResult | WatermarkImagesResult | RotateImagesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | FaviconResult | WatermarkImagesResult | RotateImagesResult | MemeMakerResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -130,6 +133,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isFaviconGenerator = tool.id === 'favicon-generator'
   const isWatermarkImages = tool.id === 'watermark-images'
   const isRotateImages = tool.id === 'rotate-images'
+  const isMemeMaker = tool.id === 'meme-maker'
   const [splitConfig, setSplitConfig] = React.useState<SplitConfig>({ mode: 'each', ranges: '' })
   const [rotateConfig, setRotateConfig] = React.useState<RotateConfig>({ angle: 90 })
   const [imagesConfig, setImagesConfig] = React.useState<ImagesToPdfConfig>({
@@ -501,6 +505,18 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         ...options,
         rotations: rotRes?.rotations ?? {},
       }
+    } else if (isMemeMaker) {
+      // Meme Maker: every file is processed, per-file, with its own text
+      // layers + inside/outside mode from the interactive view.
+      const memeRes = interactiveResult as MemeMakerResult | null
+      for (const qf of files) {
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
+      }
+      runOptions = {
+        ...options,
+        memes: memeRes?.memes ?? {},
+      }
     } else if (isConvertImages) {
       // Convert Images: every file is processed, per-file, each with its own
       // target format chosen in the interactive view.
@@ -705,7 +721,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         <input
           ref={addMoreInputRef}
           type="file"
-          accept={isConvertImages || isFaviconGenerator || isWatermarkImages || isRotateImages ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
+          accept={isConvertImages || isFaviconGenerator || isWatermarkImages || isRotateImages || isMemeMaker ? 'image/*' : isWordToPdf ? '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document' : isExcelToPdf ? '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : isImagesToPdf || isCropImages ? 'image/jpeg,image/jpg,image/png,image/webp' : 'application/pdf'}
           multiple
           className="hidden"
           onChange={handleAddMoreChange}
@@ -788,6 +804,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           />
         ) : isRotateImages && files.length > 0 ? (
           <RotateImagesView
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isMemeMaker && files.length > 0 ? (
+          <MemeMakerView
             files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}

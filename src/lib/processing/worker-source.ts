@@ -2123,6 +2123,123 @@ processors['rotate-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Meme Maker (caption editor) ----------------------------------------- */
+/* opts.memes: { [fileName]: { mode: 'inside'|'outside', elements: [...] } }. */
+/* Element coords are normalized to the FINAL canvas (bars included).         */
+/* 'outside' adds white bars top+bottom (BAR fraction of image height each).  */
+/* Classic meme style: Impact stack, white fill, black stroke, ALL-CAPS.      */
+/* drawMemeText mirrors the live-preview renderer in meme-maker-view.tsx —    */
+/* keep the math in sync (font stack, auto-fit, line height, stroke, rules).  */
+var MEME_BAR_FRAC = 0.16;
+var MEME_LINE_H = 1.15;
+var MEME_FIT_W = 0.92;
+
+function buildMemeFont(el, px) {
+  var weight = el.bold ? '700' : '400';
+  var style = el.italic ? 'italic ' : '';
+  var fam = el.font || 'Impact';
+  return style + weight + ' ' + px + 'px "' + fam + '", Impact, sans-serif';
+}
+
+function drawMemeText(ctx, W, H, el) {
+  var raw = el.text || '';
+  if (!raw.replace(/\\s/g, '')) return;
+  var txt = el.caps ? raw.toUpperCase() : raw;
+  var lines = txt.split('\\n');
+  var px;
+  if (!el.sizePx || el.sizePx <= 0) {
+    /* Auto-fit: start at W/8, shrink until the longest line fits 92% W. */
+    px = Math.max(14, Math.round(W / 8));
+    ctx.font = buildMemeFont(el, px);
+    var maxw = 0;
+    for (var m = 0; m < lines.length; m++) {
+      maxw = Math.max(maxw, ctx.measureText(lines[m]).width);
+    }
+    if (maxw > W * MEME_FIT_W && maxw > 0) {
+      px = Math.max(12, Math.floor(px * ((W * MEME_FIT_W) / maxw)));
+    }
+  } else {
+    px = el.sizePx;
+  }
+  ctx.font = buildMemeFont(el, px);
+  ctx.textAlign = el.align || 'center';
+  ctx.textBaseline = 'alphabetic';
+  var lh = px * MEME_LINE_H;
+  var blockH = lines.length * lh;
+  var ax = el.x * W;
+  var y0 = el.y * H - blockH / 2 + lh / 2 + px * 0.35;
+  var sw = (el.strokeWidth || 0) * px;
+  for (var i = 0; i < lines.length; i++) {
+    var ly = y0 + i * lh;
+    if (!lines[i]) continue;
+    if (sw > 0) {
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = sw;
+      ctx.strokeStyle = el.strokeColor || '#000000';
+      ctx.strokeText(lines[i], ax, ly);
+    }
+    ctx.fillStyle = el.color || '#ffffff';
+    ctx.fillText(lines[i], ax, ly);
+    if (el.underline) {
+      var wU = ctx.measureText(lines[i]).width;
+      var ux = el.align === 'left' ? ax : el.align === 'right' ? ax - wU : ax - wU / 2;
+      ctx.fillRect(ux, ly + px * 0.12, wU, Math.max(2, px * 0.06));
+    }
+  }
+}
+
+processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
+  var memes = (opts && opts.memes) || {};
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var cfg = memes[input.fileName] || { mode: 'inside', elements: [] };
+    var elements = cfg.elements || [];
+    log('Making meme ' + input.fileName + ' (' + elements.length + ' text layer' + (elements.length === 1 ? '' : 's') + ')');
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var w = bmp.width;
+    var bar = cfg.mode === 'outside' ? Math.round(bmp.height * MEME_BAR_FRAC) : 0;
+    var h = bmp.height + bar * 2;
+    var lower = (input.fileName || '').toLowerCase();
+    var isJpg = /\\.jpe?g$/.test(lower);
+    var isWebp = /\\.webp$/.test(lower);
+    var mime = isJpg ? 'image/jpeg' : isWebp ? 'image/webp' : 'image/png';
+    var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
+    var canvas = new OffscreenCanvas(w, h);
+    var ctx = canvas.getContext('2d');
+    if (mime === 'image/jpeg' || bar > 0) {
+      /* JPEG has no alpha; outside mode paints the white bars. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.drawImage(bmp, 0, bar);
+    if (bmp.close) bmp.close();
+    for (var e = 0; e < elements.length; e++) {
+      drawMemeText(ctx, w, h, elements[e]);
+    }
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '-meme.' + ext,
+      data: buf,
+      mime: mime,
+      note: w + 'x' + h + ' px · ' + elements.length + ' text' + (elements.length === 1 ? '' : 's') + (bar > 0 ? ' · outside' : ''),
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 /* ---- ICO encoding helpers (favicon generator) --------------------------- */
 
 /* Encode an ImageData (RGBA, top-down) as a 32-bit ICO DIB:

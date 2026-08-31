@@ -39,6 +39,7 @@ export type ProcessorType =
   | 'favicon-generator'
   | 'watermark-images'
   | 'rotate-images'
+  | 'meme-maker'
 
 export interface ProcessInput {
   id: string
