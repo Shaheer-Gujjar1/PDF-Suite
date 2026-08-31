@@ -1,0 +1,1045 @@
+     1→'use client'
+     2→
+     3→import * as React from 'react'
+     4→import {
+     5→  ArrowDown,
+     6→  ArrowUp,
+     7→  ImagePlus,
+     8→  Loader2,
+     9→  Plus,
+    10→  Stamp as StampIcon,
+    11→  Trash2,
+    12→  Type as TypeIcon,
+    13→  X,
+    14→} from 'lucide-react'
+    15→import {
+    16→  Select,
+    17→  SelectContent,
+    18→  SelectItem,
+    19→  SelectTrigger,
+    20→  SelectValue,
+    21→} from '@/components/ui/select'
+    22→import { Slider } from '@/components/ui/slider'
+    23→import { Switch } from '@/components/ui/switch'
+    24→import { Input } from '@/components/ui/input'
+    25→import { Label } from '@/components/ui/label'
+    26→import { cn } from '@/lib/utils'
+    27→
+    28→export type WmPosition =
+    29→  | 'top-left'
+    30→  | 'top-center'
+    31→  | 'top-right'
+    32→  | 'middle-left'
+    33→  | 'middle-center'
+    34→  | 'middle-right'
+    35→  | 'bottom-left'
+    36→  | 'bottom-center'
+    37→  | 'bottom-right'
+    38→
+    39→export interface WatermarkLayerState {
+    40→  id: string
+    41→  type: 'text' | 'image'
+    42→  /* text layers */
+    43→  text: string
+    44→  fontFamily: string
+    45→  /** 0 = auto (min(w, h) / 8). */
+    46→  fontSizePx: number
+    47→  color: string
+    48→  /* image (logo) layers */
+    49→  logo: File | null
+    50→  logoUrl: string | null
+    51→  /** Logo width as % of the image width. */
+    52→  scale: number
+    53→  /* shared */
+    54→  /** 0..1 */
+    55→  opacity: number
+    56→  /** degrees, clockwise */
+    57→  rotation: number
+    58→  tile: boolean
+    59→  position: WmPosition
+    60→  marginX: number
+    61→  marginY: number
+    62→  /** true = drawn on top of the image, false = behind it. */
+    63→  over: boolean
+    64→}
+    65→
+    66→export interface WatermarkImagesResult {
+    67→  layers: WatermarkLayerState[]
+    68→}
+    69→
+    70→interface WatermarkImagesViewProps {
+    71→  files: { id: string; file: File }[]
+    72→  onRemove: (id: string) => void
+    73→  onAddMore: () => void
+    74→  onChange: (result: WatermarkImagesResult | null) => void
+    75→}
+    76→
+    77→interface ImageMeta {
+    78→  url: string
+    79→  width: number
+    80→  height: number
+    81→}
+    82→
+    83→const FONTS: { value: string; label: string }[] = [
+    84→  { value: 'Arial, sans-serif', label: 'Arial' },
+    85→  { value: 'Verdana, sans-serif', label: 'Verdana' },
+    86→  { value: '"Trebuchet MS", sans-serif', label: 'Trebuchet MS' },
+    87→  { value: 'Georgia, serif', label: 'Georgia' },
+    88→  { value: '"Times New Roman", serif', label: 'Times New Roman' },
+    89→  { value: '"Courier New", monospace', label: 'Courier New' },
+    90→]
+    91→
+    92→const POSITIONS: WmPosition[] = [
+    93→  'top-left',
+    94→  'top-center',
+    95→  'top-right',
+    96→  'middle-left',
+    97→  'middle-center',
+    98→  'middle-right',
+    99→  'bottom-left',
+   100→  'bottom-center',
+   101→  'bottom-right',
+   102→]
+   103→
+   104→/** Checkerboard backdrop so transparent PNG/WEBP areas are visible. */
+   105→const CHECKER_BG: React.CSSProperties = {
+   106→  backgroundImage:
+   107→    'linear-gradient(45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(-45deg, rgba(128,128,128,0.14) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(128,128,128,0.14) 75%), linear-gradient(-45deg, transparent 75%, rgba(128,128,128,0.14) 75%)',
+   108→  backgroundSize: '16px 16px',
+   109→  backgroundPosition: '0 0, 0 8px, 8px -8px, -8px 0px',
+   110→}
+   111→
+   112→let counter = 0
+   113→function uid(): string {
+   114→  counter += 1
+   115→  return `wm_${Date.now().toString(36)}_${counter}_${Math.random().toString(36).slice(2, 6)}`
+   116→}
+   117→
+   118→function makeTextLayer(): WatermarkLayerState {
+   119→  return {
+   120→    id: uid(),
+   121→    type: 'text',
+   122→    text: '',
+   123→    fontFamily: FONTS[0].value,
+   124→    fontSizePx: 0,
+   125→    color: '#ffffff',
+   126→    logo: null,
+   127→    logoUrl: null,
+   128→    scale: 25,
+   129→    opacity: 0.5,
+   130→    rotation: 0,
+   131→    tile: false,
+   132→    position: 'bottom-right',
+   133→    marginX: 16,
+   134→    marginY: 16,
+   135→    over: true,
+   136→  }
+   137→}
+   138→
+   139→function makeLogoLayer(): WatermarkLayerState {
+   140→  return { ...makeTextLayer(), type: 'image' as const }
+   141→}
+   142→
+   143→function formatBytes(bytes: number): string {
+   144→  if (bytes === 0) return '0 B'
+   145→  const k = 1024
+   146→  const sizes = ['B', 'KB', 'MB', 'GB']
+   147→  const i = Math.floor(Math.log(bytes) / Math.log(k))
+   148→  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+   149→}
+   150→
+   151→/* ------------------------------------------------------------------------ */
+   152→/* Live preview — mirrors the worker's drawWatermarkLayer() math exactly     */
+   153→/* (same auto size, rotation, tiling, margins, opacity and layering), so     */
+   154→/* what you see here is what gets baked into every output file.              */
+   155→/* ------------------------------------------------------------------------ */
+   156→function WatermarkPreview({
+   157→  file,
+   158→  layers,
+   159→}: {
+   160→  file: File
+   161→  layers: WatermarkLayerState[]
+   162→}) {
+   163→  const canvasRef = React.useRef<HTMLCanvasElement>(null)
+   164→  const [baseImg, setBaseImg] = React.useState<HTMLImageElement | null>(null)
+   165→  const [logoImgs, setLogoImgs] = React.useState<Record<string, HTMLImageElement>>({})
+   166→
+   167→  /* Ref mirror so the logo effect below doesn't need `layers` as a dep —
+   168→     otherwise every keystroke would revoke + recreate the logo object URLs
+   169→     and make the logo flicker while typing. */
+   170→  const layersRef = React.useRef(layers)
+   171→  React.useEffect(() => {
+   172→    layersRef.current = layers
+   173→  }, [layers])
+   174→
+   175→  React.useEffect(() => {
+   176→    const url = URL.createObjectURL(file)
+   177→    const img = new Image()
+   178→    img.onload = () => setBaseImg(img)
+   179→    img.onerror = () => setBaseImg(null)
+   180→    img.src = url
+   181→    return () => {
+   182→      URL.revokeObjectURL(url)
+   183→      setBaseImg(null)
+   184→    }
+   185→  }, [file])
+   186→
+   187→  /* Reload logos ONLY when the actual set of logo files changes. */
+   188→  const logoKey = layers
+   189→    .map((l) => (l.type === 'image' && l.logo ? `${l.id}:${l.logo.name}:${l.logo.size}` : ''))
+   190→    .join('|')
+   191→
+   192→  React.useEffect(() => {
+   193→    const current = layersRef.current
+   194→    setLogoImgs({})
+   195→    if (current.every((l) => l.type !== 'image' || !l.logo)) return
+   196→    let alive = true
+   197→    const urls: string[] = []
+   198→    for (const l of current) {
+   199→      if (l.type !== 'image' || !l.logo) continue
+   200→      const url = URL.createObjectURL(l.logo)
+   201→      urls.push(url)
+   202→      const img = new Image()
+   203→      img.onload = () => {
+   204→        if (alive) setLogoImgs((prev) => ({ ...prev, [l.id]: img }))
+   205→      }
+   206→      img.src = url
+   207→    }
+   208→    return () => {
+   209→      alive = false
+   210→      for (const u of urls) URL.revokeObjectURL(u)
+   211→    }
+   212→  }, [logoKey])
+   213→
+   214→  React.useEffect(() => {
+   215→    const canvas = canvasRef.current
+   216→    if (!canvas || !baseImg) return
+   217→    const ctx = canvas.getContext('2d')
+   218→    if (!ctx) return
+   219→    const W = baseImg.naturalWidth || 1
+   220→    const H = baseImg.naturalHeight || 1
+   221→    canvas.width = W
+   222→    canvas.height = H
+   223→    ctx.clearRect(0, 0, W, H)
+   224→    if (file.type === 'image/jpeg') {
+   225→      ctx.fillStyle = '#ffffff'
+   226→      ctx.fillRect(0, 0, W, H)
+   227→    }
+   228→
+   229→    const drawLayer = (L: WatermarkLayerState) => {
+   230→      let tw: number
+   231→      let th: number
+   232→      if (L.type === 'text') {
+   233→        const text = L.text || ''
+   234→        if (!text) return
+   235→        const size =
+   236→          L.fontSizePx > 0
+   237→            ? L.fontSizePx
+   238→            : Math.max(12, Math.round(Math.min(W, H) / 8))
+   239→        ctx.font = `${size}px ${L.fontFamily || 'sans-serif'}`
+   240→        ctx.textAlign = 'center'
+   241→        ctx.textBaseline = 'middle'
+   242→        tw = ctx.measureText(text).width
+   243→        th = size
+   244→      } else {
+   245→        const logo = logoImgs[L.id]
+   246→        if (!logo) return
+   247→        const scale = Math.max(1, Math.min(100, L.scale || 25)) / 100
+   248→        tw = Math.max(1, Math.round(W * scale))
+   249→        th = Math.max(1, Math.round(logo.naturalHeight * (tw / logo.naturalWidth)))
+   250→      }
+   251→      const rad = ((L.rotation || 0) * Math.PI) / 180
+   252→      const cos = Math.abs(Math.cos(rad))
+   253→      const sin = Math.abs(Math.sin(rad))
+   254→      const bboxW = tw * cos + th * sin
+   255→      const bboxH = tw * sin + th * cos
+   256→      const mX = Math.max(0, L.marginX || 0)
+   257→      const mY = Math.max(0, L.marginY || 0)
+   258→      const stamp = (cx: number, cy: number) => {
+   259→        ctx.save()
+   260→        ctx.globalAlpha = Math.max(0, Math.min(1, L.opacity == null ? 0.5 : L.opacity))
+   261→        ctx.translate(cx, cy)
+   262→        ctx.rotate(rad)
+   263→        if (L.type === 'text') {
+   264→          ctx.fillStyle = L.color || '#000000'
+   265→          ctx.fillText(L.text, 0, 0)
+   266→        } else {
+   267→          ctx.drawImage(logoImgs[L.id], -tw / 2, -th / 2, tw, th)
+   268→        }
+   269→        ctx.restore()
+   270→      }
+   271→      if (L.tile) {
+   272→        const stepX = bboxW + mX * 2
+   273→        const stepY = bboxH + mY * 2
+   274→        for (let yy = -stepY; yy < H + stepY; yy += stepY) {
+   275→          for (let xx = -stepX; xx < W + stepX; xx += stepX) {
+   276→            stamp(xx + stepX / 2, yy + stepY / 2)
+   277→          }
+   278→        }
+   279→      } else {
+   280→        const pos = L.position || 'bottom-right'
+   281→        const cx = pos.includes('left')
+   282→          ? mX + bboxW / 2
+   283→          : pos.includes('right')
+   284→            ? W - mX - bboxW / 2
+   285→            : W / 2
+   286→        const cy = pos.includes('top')
+   287→          ? mY + bboxH / 2
+   288→          : pos.includes('bottom')
+   289→            ? H - mY - bboxH / 2
+   290→            : H / 2
+   291→        stamp(cx, cy)
+   292→      }
+   293→    }
+   294→
+   295→    for (const l of layers.filter((x) => x.over === false)) drawLayer(l)
+   296→    ctx.globalAlpha = 1
+   297→    ctx.drawImage(baseImg, 0, 0)
+   298→    for (const l of layers.filter((x) => x.over !== false)) drawLayer(l)
+   299→    ctx.globalAlpha = 1
+   300→  }, [baseImg, logoImgs, layers, file])
+   301→
+   302→  return (
+   303→    <div
+   304→      className="overflow-hidden rounded-2xl border border-border/60"
+   305→      style={CHECKER_BG}
+   306→    >
+   307→      {baseImg ? (
+   308→        <canvas
+   309→          ref={canvasRef}
+   310→          className="mx-auto block h-auto max-h-[560px] w-auto max-w-full"
+   311→        />
+   312→      ) : (
+   313→        <div className="grid h-64 place-items-center">
+   314→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+   315→        </div>
+   316→      )}
+   317→    </div>
+   318→  )
+   319→}
+   320→
+   321→/* ------------------------------------------------------------------------ */
+   322→/* Single watermark layer editor (rendered for the ACTIVE layer only)        */
+   323→/* ------------------------------------------------------------------------ */
+   324→function LayerCard({
+   325→  layer,
+   326→  index,
+   327→  onChange,
+   328→  onRemove,
+   329→}: {
+   330→  layer: WatermarkLayerState
+   331→  index: number
+   332→  onChange: (patch: Partial<WatermarkLayerState>) => void
+   333→  onRemove: () => void
+   334→}) {
+   335→  const isText = layer.type === 'text'
+   336→  return (
+   337→    <div className="rounded-2xl border border-border/70 bg-card p-4">
+   338→      {/* Header */}
+   339→      <div className="mb-4 flex items-center gap-2">
+   340→        <span className="grid h-7 w-7 place-items-center rounded-lg bg-primary/10 text-primary">
+   341→          {isText ? <TypeIcon className="h-4 w-4" /> : <StampIcon className="h-4 w-4" />}
+   342→        </span>
+   343→        <p className="flex-1 text-sm font-medium">
+   344→          {isText ? 'Text watermark' : 'Logo watermark'}
+   345→          <span className="ml-2 text-xs font-normal text-muted-foreground">
+   346→            layer {index + 1}
+   347→          </span>
+   348→        </p>
+   349→        <button
+   350→          type="button"
+   351→          onClick={onRemove}
+   352→          className="grid h-7 w-7 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+   353→          aria-label="Remove this watermark layer"
+   354→        >
+   355→          <Trash2 className="h-3.5 w-3.5" />
+   356→        </button>
+   357→      </div>
+   358→
+   359→      {/* Type-specific controls */}
+   360→      {isText ? (
+   361→        <div className="space-y-4">
+   362→          <div className="space-y-2">
+   363→            <Label className="text-xs font-medium text-muted-foreground">Text</Label>
+   364→            <Input
+   365→              value={layer.text}
+   366→              onChange={(e) => onChange({ text: e.target.value })}
+   367→              placeholder="Your watermark text…"
+   368→              aria-label="Watermark text"
+   369→            />
+   370→          </div>
+   371→          <div className="grid grid-cols-2 gap-3">
+   372→            <div className="space-y-2">
+   373→              <Label className="text-xs font-medium text-muted-foreground">Font</Label>
+   374→              <Select
+   375→                value={layer.fontFamily}
+   376→                onValueChange={(v) => onChange({ fontFamily: v })}
+   377→              >
+   378→                <SelectTrigger aria-label="Watermark font">
+   379→                  <SelectValue />
+   380→                </SelectTrigger>
+   381→                <SelectContent>
+   382→                  {FONTS.map((f) => (
+   383→                    <SelectItem key={f.value} value={f.value}>
+   384→                      {f.label}
+   385→                    </SelectItem>
+   386→                  ))}
+   387→                </SelectContent>
+   388→              </Select>
+   389→            </div>
+   390→            <div className="space-y-2">
+   391→              <Label className="text-xs font-medium text-muted-foreground">Color</Label>
+   392→              <input
+   393→                type="color"
+   394→                value={layer.color}
+   395→                onChange={(e) => onChange({ color: e.target.value })}
+   396→                aria-label="Watermark color"
+   397→                className="h-9 w-full cursor-pointer rounded-md border border-border bg-transparent p-1"
+   398→              />
+   399→            </div>
+   400→          </div>
+   401→          <div className="space-y-2">
+   402→            <div className="flex items-center justify-between">
+   403→              <Label className="text-xs font-medium text-muted-foreground">
+   404→                Size {layer.fontSizePx > 0 ? `· ${layer.fontSizePx} px` : '· auto-fit'}
+   405→              </Label>
+   406→              <span className="flex items-center gap-2 text-xs text-muted-foreground">
+   407→                Auto
+   408→                <Switch
+   409→                  checked={layer.fontSizePx === 0}
+   410→                  onCheckedChange={(v) => onChange({ fontSizePx: v ? 0 : 48 })}
+   411→                  aria-label="Automatic text size"
+   412→                />
+   413→              </span>
+   414→            </div>
+   415→            <Slider
+   416→              value={[layer.fontSizePx > 0 ? layer.fontSizePx : 48]}
+   417→              min={8}
+   418→              max={200}
+   419→              step={1}
+   420→              disabled={layer.fontSizePx === 0}
+   421→              onValueChange={(v) => onChange({ fontSizePx: v[0] })}
+   422→              aria-label="Text size in pixels"
+   423→            />
+   424→          </div>
+   425→        </div>
+   426→      ) : (
+   427→        <div className="space-y-4">
+   428→          <div className="space-y-2">
+   429→            <Label className="text-xs font-medium text-muted-foreground">Logo image</Label>
+   430→            <div className="flex items-center gap-3">
+   431→              {layer.logoUrl ? (
+   432→                <img
+   433→                  src={layer.logoUrl}
+   434→                  alt="Watermark logo"
+   435→                  className="h-12 w-12 shrink-0 rounded-lg border border-border/60 bg-muted object-contain p-1"
+   436→                  draggable={false}
+   437→                />
+   438→              ) : (
+   439→                <div className="grid h-12 w-12 shrink-0 place-items-center rounded-lg border border-dashed border-border bg-muted">
+   440→                  <StampIcon className="h-4 w-4 text-muted-foreground" />
+   441→                </div>
+   442→              )}
+   443→              <label className="min-w-0 flex-1 cursor-pointer">
+   444→                <input
+   445→                  type="file"
+   446→                  accept="image/*"
+   447→                  className="sr-only"
+   448→                  onChange={(e) => {
+   449→                    const f = e.target.files?.[0]
+   450→                    if (f) onChange({ logo: f, logoUrl: URL.createObjectURL(f) })
+   451→                    e.target.value = ''
+   452→                  }}
+   453→                />
+   454→                <span className="block truncate rounded-lg border border-border bg-secondary px-3 py-2 text-xs font-medium transition-colors hover:bg-secondary/70">
+   455→                  {layer.logo ? layer.logo.name : 'Choose a PNG/JPG logo…'}
+   456→                </span>
+   457→              </label>
+   458→            </div>
+   459→          </div>
+   460→          <div className="space-y-2">
+   461→            <Label className="text-xs font-medium text-muted-foreground">
+   462→              Size · {layer.scale}% of image width
+   463→            </Label>
+   464→            <Slider
+   465→              value={[layer.scale]}
+   466→              min={5}
+   467→              max={100}
+   468→              step={1}
+   469→              onValueChange={(v) => onChange({ scale: v[0] })}
+   470→              aria-label="Logo size as percent of image width"
+   471→            />
+   472→          </div>
+   473→        </div>
+   474→      )}
+   475→
+   476→      {/* Shared controls */}
+   477→      <div className="mt-4 space-y-4">
+   478→        <div className="grid grid-cols-2 gap-3">
+   479→          <div className="space-y-2">
+   480→            <Label className="text-xs font-medium text-muted-foreground">
+   481→              Opacity · {Math.round(layer.opacity * 100)}%
+   482→            </Label>
+   483→            <Slider
+   484→              value={[Math.round(layer.opacity * 100)]}
+   485→              min={5}
+   486→              max={100}
+   487→              step={1}
+   488→              onValueChange={(v) => onChange({ opacity: v[0] / 100 })}
+   489→              aria-label="Watermark opacity"
+   490→            />
+   491→          </div>
+   492→          <div className="space-y-2">
+   493→            <Label className="text-xs font-medium text-muted-foreground">
+   494→              Rotation · {layer.rotation}°
+   495→            </Label>
+   496→            <Slider
+   497→              value={[layer.rotation]}
+   498→              min={-180}
+   499→              max={180}
+   500→              step={1}
+   501→              onValueChange={(v) => onChange({ rotation: v[0] })}
+   502→              aria-label="Watermark rotation"
+   503→            />
+   504→          </div>
+   505→        </div>
+   506→
+   507→        {/* Placement */}
+   508→        <div className="space-y-2">
+   509→          <div className="flex items-center justify-between">
+   510→            <Label className="text-xs font-medium text-muted-foreground">
+   511→              Tile across the image
+   512→            </Label>
+   513→            <Switch
+   514→              checked={layer.tile}
+   515→              onCheckedChange={(v) => onChange({ tile: v })}
+   516→              aria-label="Tile the watermark across the whole image"
+   517→            />
+   518→          </div>
+   519→          <div className="flex items-center gap-3">
+   520→            <div className="grid w-[78px] shrink-0 grid-cols-3 gap-1" role="group" aria-label="Watermark placement">
+   521→              {POSITIONS.map((p) => (
+   522→                <button
+   523→                  key={p}
+   524→                  type="button"
+   525→                  disabled={layer.tile}
+   526→                  onClick={() => onChange({ position: p })}
+   527→                  aria-label={`Place watermark ${p.replace('-', ' ')}`}
+   528→                  aria-pressed={!layer.tile && layer.position === p}
+   529→                  className={cn(
+   530→                    'h-6 w-6 rounded-md border border-border transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+   531→                    !layer.tile && layer.position === p
+   532→                      ? 'bg-primary text-primary-foreground'
+   533→                      : 'bg-secondary/60 hover:bg-secondary'
+   534→                  )}
+   535→                />
+   536→              ))}
+   537→            </div>
+   538→            <p className="text-[11px] leading-snug text-muted-foreground">
+   539→              {layer.tile
+   540→                ? 'Repeats over the whole image — margins set the gap between stamps.'
+   541→                : 'Pick one of the 9 spots — margins push it away from the edges.'}
+   542→            </p>
+   543→          </div>
+   544→        </div>
+   545→
+   546→        {/* Margins */}
+   547→        <div className="grid grid-cols-2 gap-3">
+   548→          <div className="space-y-2">
+   549→            <Label className="text-xs font-medium text-muted-foreground">
+   550→              H-margin · {layer.marginX}
+   551→            </Label>
+   552→            <Slider
+   553→              value={[layer.marginX]}
+   554→              min={0}
+   555→              max={100}
+   556→              step={1}
+   557→              onValueChange={(v) => onChange({ marginX: v[0] })}
+   558→              aria-label="Horizontal margin"
+   559→            />
+   560→          </div>
+   561→          <div className="space-y-2">
+   562→            <Label className="text-xs font-medium text-muted-foreground">
+   563→              V-margin · {layer.marginY}
+   564→            </Label>
+   565→            <Slider
+   566→              value={[layer.marginY]}
+   567→              min={0}
+   568→              max={100}
+   569→              step={1}
+   570→              onValueChange={(v) => onChange({ marginY: v[0] })}
+   571→              aria-label="Vertical margin"
+   572→            />
+   573→          </div>
+   574→        </div>
+   575→
+   576→        {/* Layering */}
+   577→        <div className="space-y-2">
+   578→          <Label className="text-xs font-medium text-muted-foreground">Layering</Label>
+   579→          <div className="inline-flex rounded-lg border border-border p-0.5">
+   580→            <button
+   581→              type="button"
+   582→              onClick={() => onChange({ over: true })}
+   583→              aria-pressed={layer.over}
+   584→              className={cn(
+   585→                'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+   586→                layer.over
+   587→                  ? 'bg-primary text-primary-foreground'
+   588→                  : 'text-muted-foreground hover:text-foreground'
+   589→              )}
+   590→            >
+   591→              Over image
+   592→            </button>
+   593→            <button
+   594→              type="button"
+   595→              onClick={() => onChange({ over: false })}
+   596→              aria-pressed={!layer.over}
+   597→              className={cn(
+   598→                'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+   599→                !layer.over
+   600→                  ? 'bg-primary text-primary-foreground'
+   601→                  : 'text-muted-foreground hover:text-foreground'
+   602→              )}
+   603→            >
+   604→              Behind image
+   605→            </button>
+   606→          </div>
+   607→          <p className="text-[11px] leading-snug text-muted-foreground">
+   608→            &ldquo;Behind&rdquo; only shows through transparent areas (PNG/WEBP).
+   609→          </p>
+   610→        </div>
+   611→      </div>
+   612→    </div>
+   613→  )
+   614→}
+   615→
+   616→/* ------------------------------------------------------------------------ */
+   617→/* Main view — iloveimg-style visual editing studio                          */
+   618→/* ------------------------------------------------------------------------ */
+   619→export function WatermarkImagesView({
+   620→  files,
+   621→  onRemove,
+   622→  onAddMore,
+   623→  onChange,
+   624→}: WatermarkImagesViewProps) {
+   625→  const [meta, setMeta] = React.useState<Record<string, ImageMeta>>({})
+   626→  const [layers, setLayers] = React.useState<WatermarkLayerState[]>([])
+   627→  const [activeLayerId, setActiveLayerId] = React.useState<string | null>(null)
+   628→  const [activeImageId, setActiveImageId] = React.useState<string | null>(null)
+   629→  const [addOpen, setAddOpen] = React.useState(false)
+   630→  const urlsRef = React.useRef<Record<string, string>>({})
+   631→
+   632→  /* Revoke logo object URLs on unmount. */
+   633→  const layersRef = React.useRef<WatermarkLayerState[]>([])
+   634→  React.useEffect(() => {
+   635→    layersRef.current = layers
+   636→  }, [layers])
+   637→  React.useEffect(
+   638→    () => () => {
+   639→      for (const l of layersRef.current) {
+   640→        if (l.logoUrl) URL.revokeObjectURL(l.logoUrl)
+   641→      }
+   642→    },
+   643→    []
+   644→  )
+   645→
+   646→  /* ---------------- Load image metadata (size + object URL) ------------- */
+   647→  React.useEffect(() => {
+   648→    let cancelled = false
+   649→
+   650→    setMeta((prev) => {
+   651→      const next: Record<string, ImageMeta> = {}
+   652→      for (const f of files) {
+   653→        if (prev[f.id]) next[f.id] = prev[f.id]
+   654→      }
+   655→      for (const id of Object.keys(urlsRef.current)) {
+   656→        if (!next[id] && urlsRef.current[id]) {
+   657→          URL.revokeObjectURL(urlsRef.current[id])
+   658→          delete urlsRef.current[id]
+   659→        }
+   660→      }
+   661→      return next
+   662→    })
+   663→
+   664→    const missing = files.filter((f) => !urlsRef.current[f.id])
+   665→    for (const f of missing) {
+   666→      const url = URL.createObjectURL(f.file)
+   667→      urlsRef.current[f.id] = url
+   668→      const img = new Image()
+   669→      img.onload = () => {
+   670→        if (cancelled) return
+   671→        setMeta((prev) => ({
+   672→          ...prev,
+   673→          [f.id]: {
+   674→            url,
+   675→            width: img.naturalWidth || 1,
+   676→            height: img.naturalHeight || 1,
+   677→          },
+   678→        }))
+   679→      }
+   680→      img.onerror = () => {
+   681→        if (cancelled) return
+   682→        setMeta((prev) => ({ ...prev, [f.id]: { url, width: 1, height: 1 } }))
+   683→      }
+   684→      img.src = url
+   685→    }
+   686→
+   687→    return () => {
+   688→      cancelled = true
+   689→    }
+   690→  }, [files])
+   691→
+   692→  // Revoke everything on unmount.
+   693→  React.useEffect(() => {
+   694→    const urls = urlsRef.current
+   695→    return () => {
+   696→      for (const id of Object.keys(urls)) URL.revokeObjectURL(urls[id])
+   697→    }
+   698→  }, [])
+   699→
+   700→  /* ---------------- Emit result whenever layers change ------------------- */
+   701→  React.useEffect(() => {
+   702→    if (files.length === 0 || layers.length === 0) {
+   703→      onChange(null)
+   704→      return
+   705→    }
+   706→    onChange({ layers })
+   707→  }, [files, layers, onChange])
+   708→
+   709→  /* Keep the previewed image valid as the queue changes. */
+   710→  React.useEffect(() => {
+   711→    if (files.length === 0) {
+   712→      setActiveImageId(null)
+   713→      return
+   714→    }
+   715→    setActiveImageId((prev) =>
+   716→      prev && files.some((f) => f.id === prev) ? prev : files[0].id
+   717→    )
+   718→  }, [files])
+   719→
+   720→  /* Keep the active layer valid as layers come and go. */
+   721→  React.useEffect(() => {
+   722→    if (layers.length === 0) {
+   723→      setActiveLayerId(null)
+   724→      return
+   725→    }
+   726→    setActiveLayerId((prev) =>
+   727→      prev && layers.some((l) => l.id === prev) ? prev : layers[layers.length - 1].id
+   728→    )
+   729→  }, [layers])
+   730→
+   731→  const activeFile = files.find((f) => f.id === activeImageId) ?? files[0] ?? null
+   732→  const activeLayer = layers.find((l) => l.id === activeLayerId) ?? null
+   733→
+   734→  const patchLayer = (id: string, patch: Partial<WatermarkLayerState>) =>
+   735→    setLayers((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)))
+   736→
+   737→  const removeLayer = (id: string) =>
+   738→    setLayers((prev) => {
+   739→      const target = prev.find((l) => l.id === id)
+   740→      if (target?.logoUrl) URL.revokeObjectURL(target.logoUrl)
+   741→      return prev.filter((l) => l.id !== id)
+   742→    })
+   743→
+   744→  const addLayer = (type: 'text' | 'image') => {
+   745→    const layer = type === 'text' ? makeTextLayer() : makeLogoLayer()
+   746→    setLayers((prev) => [...prev, layer])
+   747→    setActiveLayerId(layer.id)
+   748→  }
+   749→
+   750→  /* dir +1 = one step towards the top of the visual stack (drawn later). */
+   751→  const moveLayer = (id: string, dir: -1 | 1) =>
+   752→    setLayers((prev) => {
+   753→      const i = prev.findIndex((l) => l.id === id)
+   754→      const j = i + dir
+   755→      if (i < 0 || j < 0 || j >= prev.length) return prev
+   756→      const next = [...prev]
+   757→      ;[next[i], next[j]] = [next[j], next[i]]
+   758→      return next
+   759→    })
+   760→
+   761→  const layerLabel = (l: WatermarkLayerState, i: number) =>
+   762→    l.type === 'text'
+   763→      ? `Text ${i + 1} · ${l.text.trim().slice(0, 16) || 'empty'}`
+   764→      : `Logo ${i + 1} · ${(l.logo?.name || 'no file').replace(/\.[^.]+$/, '').slice(0, 16)}`
+   765→
+   766→  return (
+   767→    <div className="space-y-4">
+   768→      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+   769→        {/* ------------------------- Canvas column ------------------------- */}
+   770→        <div className="space-y-3">
+   771→          <div className="relative">
+   772→            {/* Floating layer toolbar (switch + reorder) */}
+   773→            {layers.length > 0 && (
+   774→              <div className="absolute left-1/2 top-3 z-20 -translate-x-1/2">
+   775→                <div className="flex items-center gap-1 rounded-xl border border-border/70 bg-card/95 p-1 shadow-lg backdrop-blur">
+   776→                  <button
+   777→                    type="button"
+   778→                    onClick={() => activeLayer && moveLayer(activeLayer.id, 1)}
+   779→                    disabled={!activeLayer || layers.indexOf(activeLayer) === layers.length - 1}
+   780→                    className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
+   781→                    aria-label="Bring layer forward (moves it on top)"
+   782→                  >
+   783→                    <ArrowUp className="h-4 w-4" />
+   784→                  </button>
+   785→                  <button
+   786→                    type="button"
+   787→                    onClick={() => activeLayer && moveLayer(activeLayer.id, -1)}
+   788→                    disabled={!activeLayer || layers.indexOf(activeLayer) === 0}
+   789→                    className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary disabled:pointer-events-none disabled:opacity-40"
+   790→                    aria-label="Send layer backward (moves it underneath)"
+   791→                  >
+   792→                    <ArrowDown className="h-4 w-4" />
+   793→                  </button>
+   794→                  <Select
+   795→                    value={activeLayerId ?? undefined}
+   796→                    onValueChange={(v) => setActiveLayerId(v)}
+   797→                  >
+   798→                    <SelectTrigger
+   799→                      className="h-8 w-[200px] sm:w-[250px]"
+   800→                      aria-label="Active watermark layer"
+   801→                    >
+   802→                      <SelectValue placeholder="Pick a layer…" />
+   803→                    </SelectTrigger>
+   804→                    <SelectContent>
+   805→                      {layers.map((l, i) => (
+   806→                        <SelectItem key={l.id} value={l.id}>
+   807→                          {layerLabel(l, i)}
+   808→                        </SelectItem>
+   809→                      ))}
+   810→                    </SelectContent>
+   811→                  </Select>
+   812→                </div>
+   813→              </div>
+   814→            )}
+   815→
+   816→            {/* Live canvas */}
+   817→            {activeFile ? (
+   818→              <WatermarkPreview file={activeFile.file} layers={layers} />
+   819→            ) : (
+   820→              <div
+   821→                className="grid h-64 place-items-center rounded-2xl border border-border/60 text-sm text-muted-foreground"
+   822→                style={CHECKER_BG}
+   823→              >
+   824→                No image selected
+   825→              </div>
+   826→            )}
+   827→
+   828→            {/* Floating add-layer button */}
+   829→            <div className="absolute right-4 top-1/2 z-20 -translate-y-1/2">
+   830→              {addOpen && (
+   831→                <div
+   832→                  className="fixed inset-0 z-10"
+   833→                  onClick={() => setAddOpen(false)}
+   834→                  aria-hidden
+   835→                />
+   836→              )}
+   837→              {addOpen && (
+   838→                <div className="absolute bottom-14 right-0 z-20 w-48 overflow-hidden rounded-xl border border-border/70 bg-card shadow-xl">
+   839→                  <button
+   840→                    type="button"
+   841→                    onClick={() => {
+   842→                      addLayer('text')
+   843→                      setAddOpen(false)
+   844→                    }}
+   845→                    className="flex w-full items-center gap-2 px-4 py-2.5 text-sm transition-colors hover:bg-secondary"
+   846→                  >
+   847→                    <TypeIcon className="h-4 w-4 text-primary" />
+   848→                    Text watermark
+   849→                  </button>
+   850→                  <button
+   851→                    type="button"
+   852→                    onClick={() => {
+   853→                      addLayer('image')
+   854→                      setAddOpen(false)
+   855→                    }}
+   856→                    className="flex w-full items-center gap-2 px-4 py-2.5 text-sm transition-colors hover:bg-secondary"
+   857→                  >
+   858→                    <StampIcon className="h-4 w-4 text-primary" />
+   859→                    Image watermark
+   860→                  </button>
+   861→                </div>
+   862→              )}
+   863→              <button
+   864→                type="button"
+   865→                onClick={() => setAddOpen((o) => !o)}
+   866→                aria-label="Add a watermark layer"
+   867→                aria-expanded={addOpen}
+   868→                className="relative grid h-12 w-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
+   869→              >
+   870→                <Plus className="h-5 w-5" />
+   871→                {layers.length > 0 && (
+   872→                  <span className="absolute -left-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-foreground px-1 text-[10px] font-bold text-background">
+   873→                    {layers.length}
+   874→                  </span>
+   875→                )}
+   876→              </button>
+   877→            </div>
+   878→          </div>
+   879→
+   880→          {/* Queued images film strip */}
+   881→          <div className="flex gap-2 overflow-x-auto pb-1">
+   882→            {files.map((f) => {
+   883→              const active = f.id === activeFile?.id
+   884→              const url = meta[f.id]?.url
+   885→              return (
+   886→                <div key={f.id} className="group relative shrink-0">
+   887→                  <button
+   888→                    type="button"
+   889→                    onClick={() => setActiveImageId(f.id)}
+   890→                    aria-label={`Preview ${f.file.name}`}
+   891→                    aria-pressed={active}
+   892→                    className={cn(
+   893→                      'block h-14 w-20 overflow-hidden rounded-lg border-2 bg-muted transition-all',
+   894→                      active
+   895→                        ? 'border-primary'
+   896→                        : 'border-transparent opacity-80 hover:opacity-100'
+   897→                    )}
+   898→                  >
+   899→                    {url ? (
+   900→                      <img
+   901→                        src={url}
+   902→                        alt=""
+   903→                        className="h-full w-full object-cover"
+   904→                        draggable={false}
+   905→                      />
+   906→                    ) : (
+   907→                      <Loader2 className="mx-auto mt-5 h-4 w-4 animate-spin text-muted-foreground" />
+   908→                    )}
+   909→                  </button>
+   910→                  <button
+   911→                    type="button"
+   912→                    onClick={() => onRemove(f.id)}
+   913→                    aria-label={`Remove ${f.file.name}`}
+   914→                    className="absolute -right-1.5 -top-1.5 hidden h-5 w-5 place-items-center rounded-full bg-destructive text-white shadow group-hover:grid"
+   915→                  >
+   916→                    <X className="h-3 w-3" />
+   917→                  </button>
+   918→                </div>
+   919→              )
+   920→            })}
+   921→            <button
+   922→              type="button"
+   923→              onClick={onAddMore}
+   924→              aria-label="Add more images"
+   925→              className="grid h-14 w-20 shrink-0 place-items-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+   926→            >
+   927→              <ImagePlus className="h-4 w-4" />
+   928→            </button>
+   929→          </div>
+   930→        </div>
+   931→
+   932→        {/* ------------------------- Sidebar column ------------------------ */}
+   933→        <div className="space-y-3">
+   934→          <div className="rounded-2xl border border-border/70 bg-secondary/40 p-4">
+   935→            <p className="text-sm font-semibold">Watermark layers</p>
+   936→            <div className="mt-3 grid gap-2">
+   937→              <button
+   938→                type="button"
+   939→                onClick={() => addLayer('image')}
+   940→                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+   941→              >
+   942→                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+   943→                  <StampIcon className="h-4 w-4" />
+   944→                </span>
+   945→                Add image watermark
+   946→              </button>
+   947→              <button
+   948→                type="button"
+   949→                onClick={() => addLayer('text')}
+   950→                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+   951→              >
+   952→                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+   953→                  <TypeIcon className="h-4 w-4" />
+   954→                </span>
+   955→                Add text watermark
+   956→              </button>
+   957→            </div>
+   958→
+   959→            {layers.length > 0 && (
+   960→              <div className="mt-3 space-y-1.5">
+   961→                {layers.map((l, i) => {
+   962→                  const active = l.id === activeLayerId
+   963→                  return (
+   964→                    <div
+   965→                      key={l.id}
+   966→                      role="button"
+   967→                      tabIndex={0}
+   968→                      onClick={() => setActiveLayerId(l.id)}
+   969→                      onKeyDown={(e) => {
+   970→                        if (e.key === 'Enter' || e.key === ' ') {
+   971→                          e.preventDefault()
+   972→                          setActiveLayerId(l.id)
+   973→                        }
+   974→                      }}
+   975→                      className={cn(
+   976→                        'flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors',
+   977→                        active
+   978→                          ? 'border-primary bg-primary/5 text-foreground'
+   979→                          : 'border-border/60 bg-card text-muted-foreground hover:border-primary/40'
+   980→                      )}
+   981→                    >
+   982→                      {l.type === 'text' ? (
+   983→                        <TypeIcon className="h-3.5 w-3.5 shrink-0" />
+   984→                      ) : (
+   985→                        <StampIcon className="h-3.5 w-3.5 shrink-0" />
+   986→                      )}
+   987→                      <span className="min-w-0 flex-1 truncate">{layerLabel(l, i)}</span>
+   988→                      <button
+   989→                        type="button"
+   990→                        onClick={(e) => {
+   991→                          e.stopPropagation()
+   992→                          removeLayer(l.id)
+   993→                        }}
+   994→                        aria-label={`Delete ${layerLabel(l, i)}`}
+   995→                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+   996→                      >
+   997→                        <Trash2 className="h-3 w-3" />
+   998→                      </button>
+   999→                    </div>
+  1000→                  )
+  1001→                })}
+  1002→              </div>
+  1003→            )}
+  1004→          </div>
+  1005→
+  1006→          {activeLayer ? (
+  1007→            <>
+  1008→              <LayerCard
+  1009→                layer={activeLayer}
+  1010→                index={layers.indexOf(activeLayer)}
+  1011→                onChange={(patch) => patchLayer(activeLayer.id, patch)}
+  1012→                onRemove={() => removeLayer(activeLayer.id)}
+  1013→              />
+  1014→              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+  1015→                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+  1016→                Editing live — every change appears on the canvas instantly.
+  1017→              </p>
+  1018→            </>
+  1019→          ) : (
+  1020→            <div className="rounded-2xl border border-dashed border-border bg-card/60 p-5 text-center">
+  1021→              <p className="text-sm font-medium">Nothing selected</p>
+  1022→              <p className="mt-1 text-xs text-muted-foreground">
+  1023→                Add a text or logo watermark, then select it here to edit —
+  1024→                the canvas updates live as you type and drag.
+  1025→              </p>
+  1026→            </div>
+  1027→          )}
+  1028→        </div>
+  1029→      </div>
+  1030→
+  1031→      {/* Hint */}
+  1032→      <div className="flex items-start gap-3 rounded-xl border border-rose-500/30 bg-rose-500/5 p-4 text-sm">
+  1033→        <StampIcon className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
+  1034→        <p className="text-muted-foreground">
+  1035→          Pick an image from the film strip, add text or logo layers with the
+  1036→          round + button, and edit them live — what you see on the canvas is
+  1037→          exactly what gets baked into every downloaded file. Stack as many
+  1038→          layers as you like; images keep their original size and format.
+  1039→          Everything runs locally; files never leave your device.
+  1040→        </p>
+  1041→      </div>
+  1042→    </div>
+  1043→  )
+  1044→}
+  1045→

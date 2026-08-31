@@ -24,6 +24,7 @@ import {
   Repeat,
   Globe,
   Laugh,
+  ScanFace,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -186,6 +187,18 @@ export const tools: Tool[] = [
     category: "image",
     icon: Laugh,
     accent: "violet",
+    batch: true,
+    step: 7,
+  },
+
+  {
+    id: "blur-faces",
+    name: "Blur Face",
+    description:
+      "Hide faces, plates and private info in any image — drag round or rectangular blur areas anywhere, stack as many as you need and dial the blur strength. Batch ready.",
+    category: "image",
+    icon: ScanFace,
+    accent: "teal",
     batch: true,
     step: 7,
   },

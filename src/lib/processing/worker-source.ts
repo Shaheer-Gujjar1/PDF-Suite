@@ -2240,6 +2240,163 @@ processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Blur Face (region censoring) ---------------------------------------- */
+/* opts.shapes: { [fileName]: [{ type: 'rect'|'ellipse', x, y, w, h }] } with */
+/* coords normalized 0..1 against the image dimensions. opts.strength 1..100  */
+/* maps to a box radius proportional to min(W,H) so the censoring looks the   */
+/* same on any image size. Three separable box-blur passes ~= gaussian with   */
+/* sigma ~= radius. Alpha is preserved so transparent PNGs keep their shape.  */
+
+function boxBlurH(src, dst, w, h, r) {
+  var win = r + r + 1;
+  for (var y = 0; y < h; y++) {
+    var row = y * w;
+    var sr = 0, sg = 0, sb = 0;
+    for (var k = -r; k <= r; k++) {
+      var xi = Math.min(w - 1, Math.max(0, k));
+      var p = (row + xi) * 4;
+      sr += src[p]; sg += src[p + 1]; sb += src[p + 2];
+    }
+    for (var x = 0; x < w; x++) {
+      var q = (row + x) * 4;
+      dst[q] = sr / win;
+      dst[q + 1] = sg / win;
+      dst[q + 2] = sb / win;
+      dst[q + 3] = src[q + 3];
+      var pa = (row + Math.min(w - 1, x + r + 1)) * 4;
+      var ps = (row + Math.max(0, x - r)) * 4;
+      sr += src[pa] - src[ps];
+      sg += src[pa + 1] - src[ps + 1];
+      sb += src[pa + 2] - src[ps + 2];
+    }
+  }
+}
+
+function boxBlurV(src, dst, w, h, r) {
+  var win = r + r + 1;
+  for (var x = 0; x < w; x++) {
+    var sr = 0, sg = 0, sb = 0;
+    for (var k = -r; k <= r; k++) {
+      var yi = Math.min(h - 1, Math.max(0, k));
+      var p = (yi * w + x) * 4;
+      sr += src[p]; sg += src[p + 1]; sb += src[p + 2];
+    }
+    for (var y = 0; y < h; y++) {
+      var q = (y * w + x) * 4;
+      dst[q] = sr / win;
+      dst[q + 1] = sg / win;
+      dst[q + 2] = sb / win;
+      dst[q + 3] = src[q + 3];
+      var pa = (Math.min(h - 1, y + r + 1) * w + x) * 4;
+      var ps = (Math.max(0, y - r) * w + x) * 4;
+      sr += src[pa] - src[ps];
+      sg += src[pa + 1] - src[ps + 1];
+      sb += src[pa + 2] - src[ps + 2];
+    }
+  }
+}
+
+function boxBlurRGBA(data, w, h, r) {
+  if (r < 1 || w < 1 || h < 1) return;
+  var tmp = new Uint8ClampedArray(data.length);
+  for (var pass = 0; pass < 3; pass++) {
+    boxBlurH(data, tmp, w, h, r);
+    boxBlurV(tmp, data, w, h, r);
+  }
+}
+
+processors['blur-faces'] = async function (inputs, opts, onProgress, log) {
+  var allShapes = (opts && opts.shapes) || {};
+  var strength = Number(opts && opts.strength);
+  if (!isFinite(strength) || strength <= 0) strength = 40;
+  strength = Math.min(100, Math.max(1, strength));
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var rawShapes = allShapes[input.fileName] || [];
+    var shapes = [];
+    for (var s = 0; s < rawShapes.length; s++) {
+      var raw = rawShapes[s];
+      var fx = Number(raw.x), fy = Number(raw.y), fw = Number(raw.w), fh = Number(raw.h);
+      if (!isFinite(fx) || !isFinite(fy) || !isFinite(fw) || !isFinite(fh)) continue;
+      fw = Math.min(Math.max(fw, 0.004), 1);
+      fh = Math.min(Math.max(fh, 0.004), 1);
+      fx = Math.min(Math.max(fx, 0), 1 - fw);
+      fy = Math.min(Math.max(fy, 0), 1 - fh);
+      shapes.push({ type: raw.type === 'rect' ? 'rect' : 'ellipse', x: fx, y: fy, w: fw, h: fh });
+    }
+    log('Blurring ' + input.fileName + (shapes.length ? ' (' + shapes.length + ' area' + (shapes.length === 1 ? '' : 's') + ')' : ' (no areas)'));
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var w = bmp.width;
+    var h = bmp.height;
+    var lower = (input.fileName || '').toLowerCase();
+    var isJpg = /\\.jpe?g$/.test(lower);
+    var isWebp = /\\.webp$/.test(lower);
+    var mime = isJpg ? 'image/jpeg' : isWebp ? 'image/webp' : 'image/png';
+    var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
+    var canvas = new OffscreenCanvas(w, h);
+    var ctx = canvas.getContext('2d');
+    if (mime === 'image/jpeg') {
+      /* JPEG has no alpha — flatten onto white first. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+    }
+    ctx.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    /* Radius scales with image size so strength feels identical everywhere. */
+    var radius = Math.round((strength / 100) * 0.25 * Math.min(w, h));
+    radius = Math.min(400, Math.max(2, radius));
+    for (var v = 0; v < shapes.length; v++) {
+      var sp = shapes[v];
+      var sx = Math.round(sp.x * w);
+      var sy = Math.round(sp.y * h);
+      var sw = Math.max(2, Math.round(sp.w * w));
+      var shh = Math.max(2, Math.round(sp.h * h));
+      if (sx + sw > w) sw = w - sx;
+      if (sy + shh > h) shh = h - sy;
+      if (sx < 0 || sy < 0 || sw < 2 || shh < 2) continue;
+      var region = ctx.getImageData(sx, sy, sw, shh);
+      boxBlurRGBA(region.data, sw, shh, radius);
+      var tmpC = new OffscreenCanvas(sw, shh);
+      tmpC.getContext('2d').putImageData(region, 0, 0);
+      ctx.save();
+      ctx.beginPath();
+      if (sp.type === 'rect') {
+        ctx.rect(sx, sy, sw, shh);
+      } else {
+        ctx.ellipse(sx + sw / 2, sy + shh / 2, sw / 2, shh / 2, 0, 0, Math.PI * 2);
+      }
+      ctx.clip();
+      ctx.drawImage(tmpC, sx, sy);
+      ctx.restore();
+    }
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });
+    if (outBlob.type && outBlob.type !== mime) {
+      throw new Error('This browser cannot encode ' + mime + ' images.');
+    }
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '-blurred.' + ext,
+      data: buf,
+      mime: mime,
+      note: shapes.length
+        ? shapes.length + ' area' + (shapes.length === 1 ? '' : 's') + ' blurred · ' + w + 'x' + h + ' px'
+        : 'no areas · ' + w + 'x' + h + ' px',
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 /* ---- ICO encoding helpers (favicon generator) --------------------------- */
 
 /* Encode an ImageData (RGBA, top-down) as a 32-bit ICO DIB:

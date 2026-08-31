@@ -40,6 +40,7 @@ export type ProcessorType =
   | 'watermark-images'
   | 'rotate-images'
   | 'meme-maker'
+  | 'blur-faces'
 
 export interface ProcessInput {
   id: string

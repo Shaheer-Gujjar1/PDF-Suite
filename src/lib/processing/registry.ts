@@ -32,6 +32,7 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   'watermark-images': 'watermark-images',
   'rotate-images': 'rotate-images',
   'meme-maker': 'meme-maker',
+  'blur-faces': 'blur-faces',
 }
 
 export function getProcessor(toolId: string): ProcessorType {
