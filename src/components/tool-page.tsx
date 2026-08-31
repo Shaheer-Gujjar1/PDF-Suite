@@ -207,6 +207,24 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const interactiveReady = isInteractive ? interactiveResult !== null : true
   const runEnabled = canProcess && interactiveReady && (!needsPassword || hasPassword) && !processing.isWorking && !preparing
 
+  /** Read a queued file's bytes defensively. A stale/unreadable file (e.g.
+   * dropped from a location that no longer has it) must surface as a toast,
+   * never as an unhandled NotFoundError that crashes the page. */
+  const readInput = async (
+    qf: QueuedFile
+  ): Promise<{ fileName: string; data: ArrayBuffer; size: number } | null> => {
+    try {
+      const data = await qf.file.arrayBuffer()
+      return { fileName: qf.file.name, data, size: qf.file.size }
+    } catch (e) {
+      console.error('[handleProcess] could not read file:', qf.file.name, e)
+      toast.error(
+        `Could not read "${qf.file.name}" — please remove it and add the file again.`
+      )
+      return null
+    }
+  }
+
   const handleProcess = async () => {
     if (!canProcess || processing.isWorking || preparing) return
 
@@ -368,8 +386,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           // Fallback: send raw DOCX to the worker's word-to-pdf processor
           console.error('DOCX render failed, falling back:', e)
           allRendered = false
-          const data = await qf.file.arrayBuffer()
-          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+          const inp = await readInput(qf)
+          if (inp) inputs.push(inp)
         }
       }
       if (allRendered) {
@@ -406,8 +424,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           runOptions = { ...options, output: 'single', pageSize: 'fit', outputName }
         } catch (e) {
           console.error('XLSX render failed, falling back:', e)
-          const data = await qf.file.arrayBuffer()
-          inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+          const inp = await readInput(qf)
+          if (inp) inputs.push(inp)
           actualProcessor = 'excel-to-pdf'
           runOptions = options
         }
@@ -421,16 +439,16 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       const cropMap = cropRes?.crops ?? {}
       for (const qf of files) {
         if (!cropMap[qf.file.name]) continue
-        const data = await qf.file.arrayBuffer()
-        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
       }
       runOptions = { ...options, crops: cropMap }
     } else if (isFaviconGenerator) {
       // Favicon Generator: every file becomes one multi-size .ico, per-file.
       const favRes = interactiveResult as FaviconResult | null
       for (const qf of files) {
-        const data = await qf.file.arrayBuffer()
-        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
       }
       runOptions = {
         ...options,
@@ -441,8 +459,8 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       // target format chosen in the interactive view.
       const convRes = interactiveResult as ConvertImagesResult | null
       for (const qf of files) {
-        const data = await qf.file.arrayBuffer()
-        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
       }
       runOptions = {
         ...options,
@@ -457,14 +475,19 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           ? wordFiles.map((wf) => files.find((f) => f.id === wf.id)!).filter(Boolean)
           : files
       for (const qf of orderedFiles) {
-        const data = await qf.file.arrayBuffer()
-        inputs.push({ fileName: qf.file.name, data, size: qf.file.size })
+        const inp = await readInput(qf)
+        if (!inp) continue
+        inputs.push(inp)
         /* For PDF to Excel: send a second copy of the raw PDF bytes with a
            special filename so the worker can parse the raw content stream
            for colors + background rects (pdf.js detaches the first copy). */
         if (isPdfToExcel) {
-          const rawCopy = await qf.file.arrayBuffer()
-          inputs.push({ fileName: '__raw__' + qf.file.name, data: rawCopy, size: rawCopy.byteLength })
+          try {
+            const rawCopy = await qf.file.arrayBuffer()
+            inputs.push({ fileName: '__raw__' + qf.file.name, data: rawCopy, size: rawCopy.byteLength })
+          } catch (e) {
+            console.error('[handleProcess] raw copy read failed:', qf.file.name, e)
+          }
         }
       }
       if (isMerge) {

@@ -2,6 +2,7 @@
 
 import * as React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { toast } from 'sonner'
 import { UploadCloud, File as FileIcon, X, Trash2, CheckCircle2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -46,13 +47,35 @@ export function Dropzone({
   const inputRef = React.useRef<HTMLInputElement>(null)
 
   const addFiles = React.useCallback(
-    (incoming: FileList | File[]) => {
+    async (incoming: FileList | File[], source: 'drop' | 'pick' = 'pick') => {
       const arr = Array.from(incoming)
       const next: QueuedFile[] = multiple
         ? [...files]
         : []
       for (const file of arr) {
-        next.push({ id: uid(), file })
+        if (source === 'drop') {
+          // Dropped files are disk-backed handles that can become unreadable
+          // once the drag session ends (file moved, dragged out of an archive
+          // preview, cloud placeholder, …) — reading them later throws
+          // NotFoundError. Snapshot the bytes NOW while the handle is valid
+          // and swap in an in-memory File that can never go stale.
+          try {
+            const buf = await file.arrayBuffer()
+            next.push({
+              id: uid(),
+              file: new File([buf], file.name, {
+                type: file.type,
+                lastModified: file.lastModified,
+              }),
+            })
+          } catch {
+            toast.error(
+              `Could not read "${file.name}" — it may have been moved or is a placeholder. Try re-dropping it.`
+            )
+          }
+        } else {
+          next.push({ id: uid(), file })
+        }
       }
       onFilesChange(multiple ? next : next.slice(0, 1))
     },
@@ -62,7 +85,7 @@ export function Dropzone({
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setDragging(false)
-    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files)
+    if (e.dataTransfer.files?.length) void addFiles(e.dataTransfer.files, 'drop')
   }
 
   const remove = (id: string) =>

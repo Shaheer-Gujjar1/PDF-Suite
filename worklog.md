@@ -669,3 +669,22 @@ Work Log:
 
 Stage Summary:
 - ToolForge now ships 25 tools / 18 implemented; Favicon Generator live (batch, any-format decode, true multi-size ICO with BMP+PNG entries, live tab preview, per-file + ZIP download). Lock policy: only user-commanded locks (currently Crop Images).
+
+---
+Task ID: 7
+Agent: Super Z (main agent)
+Task: Two user reports — (1) favicon output/ZIP "contains only 1 file, only 16px, where are other files?"; (2) dropping a file onto Favicon Generator crashed with Runtime NotFoundError ("A requested file or directory could not be found…"), while picking the file manually worked.
+
+Work Log:
+- Report 1 diagnosis: the .ico is a CONTAINER format — all selected sizes were already embedded inside the single .ico per image (verified byte-level: ICONDIR type=1 count=6, BMP DIBs 16-128 + PNG 256, all offsets in bounds). One image -> one .ico is correct favicon behavior; viewers just display the smallest entry first, hence the "only 16px" impression. But user expectation (and every favicon generator's UX) is a PACKAGE with separate files.
+- Upgrade: `processors['favicon-generator']` now emits, per input image, `<base>.ico` (multi-size, unchanged) PLUS a standalone `<base>-<N>x<N>.png` for every selected size (transparent, same contain-fit square rendering). 256px PNG bytes are shared between the ico entry and the standalone file (single encode); <256 sizes encode both DIB (for ico) and PNG (standalone). Note strings updated ("16/32/48/64/128/256 px · ico + 6 PNGs"). Guarded against duplicate-ArrayBuffer transfer (each output holds a distinct ArrayBuffer).
+- View texts updated (favicon-view.tsx): per-row "… → .ico + N PNGs", hint explains the .ico bundles all sizes and lists example PNG names.
+- Verified (agent-browser, real download blobs captured via URL.createObjectURL hook + in-page ZIP parse + DecompressionStream inflate): Download All zip = 7 files for 1 image (ico 147,645B + 6 PNGs), ICO parsed valid (type=1, count=6, planes=1, bpp=32, dims 16/32/48/64/128 DIB + 256 PNG, inBounds all true), standalone 32x32 PNG signature valid, IHDR bytes 00 00 00 20 = 32x32. Per-item Download -> 7-file zip. 3-file batch -> 21 files. Zero page errors.
+- Report 2 diagnosis: dropped files arrive as disk-backed File handles whose backing can vanish once the drag session ends (moved file, archive preview, cloud placeholder); handleProcess read `qf.file.arrayBuffer()` OUTSIDE any try/catch in ALL tool branches, so the NotFoundError surfaced as an unhandled rejection (Next.js dev overlay). Picker files are always materialized, hence "worked fine".
+- Fix A (root cause) in `src/components/dropzone.tsx`: drop-sourced files are now SNAPSHOT at drop time — `await file.arrayBuffer()` while the handle is valid, then replaced with an in-memory `new File([buf], name, {type, lastModified})` that can never go stale. Read failure -> clear toast + file skipped. Picker path unchanged (source: 'drop' | 'pick').
+- Fix B (defense in depth) in `src/components/tool-page.tsx`: new `readInput(qf)` helper wraps every input-prep read (7 call sites across word/excel fallback, crop, favicon, convert, generic ordered, pdf-to-excel rawCopy) — unreadable file now logs + toasts "Could not read …" and is skipped instead of crashing.
+- E2E after fixes: synthetic DataTransfer drop of an in-page generated 300x200 PNG -> queued -> Run -> 7 outputs; picker upload of 3 real images in same session -> 4 items x 7 outputs = 28 files; per-item + Download All zips OK; errors/console clean.
+- `bun run lint` clean.
+
+Stage Summary:
+- Favicon Generator now outputs a complete favicon package per image (multi-size .ico + one PNG per selected size), closing the "where are the other files" gap; drop-added files are byte-snapshotted at drop time and every tool's input read is failure-proof, so the NotFoundError class of crash is eliminated app-wide.
