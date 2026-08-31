@@ -48,6 +48,7 @@ import {
 import { RotateImagesView, type RotateImagesResult } from '@/components/tools/rotate-images-view'
 import { MemeMakerView, type MemeMakerResult } from '@/components/tools/meme-maker-view'
 import { BlurFacesView, type BlurFacesResult } from '@/components/tools/blur-faces-view'
+import { ensureMemeFonts } from '@/lib/meme-fonts'
 import { useProcessing } from '@/hooks/use-processing'
 import { getProcessor, isImplemented } from '@/lib/processing/registry'
 import {
@@ -511,15 +512,24 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
     } else if (isMemeMaker) {
       // Meme Maker: every file is processed, per-file, with its own text
-      // layers + inside/outside mode from the interactive view.
+      // layers + inside/outside mode from the interactive view. The bundled
+      // font faces are passed along so the worker renders text identically
+      // to the live preview.
       const memeRes = interactiveResult as MemeMakerResult | null
       for (const qf of files) {
         const inp = await readInput(qf)
         if (inp) inputs.push(inp)
       }
+      let fontData: { family: string; weight: string; data: ArrayBuffer }[] = []
+      try {
+        fontData = await ensureMemeFonts()
+      } catch (e) {
+        console.error('[handleProcess] could not load meme fonts:', e)
+      }
       runOptions = {
         ...options,
         memes: memeRes?.memes ?? {},
+        fonts: fontData,
       }
     } else if (isBlurFaces) {
       // Blur Face: every file is processed, per-file, with its own blur

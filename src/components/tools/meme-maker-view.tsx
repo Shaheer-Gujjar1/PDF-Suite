@@ -5,6 +5,8 @@ import {
   AlignCenter,
   AlignLeft,
   AlignRight,
+  ArrowDownToLine,
+  ArrowUpToLine,
   Bold,
   CaseUpper,
   Copy,
@@ -30,6 +32,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import {
+  DEFAULT_MEME_FONT,
+  MEME_FONT_FAMILIES,
+  ensureMemeFonts,
+  resolveMemeFont,
+} from '@/lib/meme-fonts'
 
 /* ------------------------------------------------------------------------ */
 /* Types & shared constants — the render math mirrors worker-source.ts       */
@@ -58,6 +66,8 @@ export interface MemeTextElement {
 
 export interface MemeState {
   mode: 'inside' | 'outside'
+  /** Which white caption bars exist in 'outside' mode (top / bottom / both). */
+  bars: 'top' | 'bottom' | 'both'
   elements: MemeTextElement[]
 }
 
@@ -70,17 +80,6 @@ const MEME_BAR_FRAC = 0.16
 const MEME_LINE_H = 1.15
 const MEME_FIT_W = 0.92
 
-const MEME_FONTS = [
-  'Impact',
-  'Arial Black',
-  'Comic Sans MS',
-  'Verdana',
-  'Trebuchet MS',
-  'Georgia',
-  'Times New Roman',
-  'Courier New',
-]
-
 const CHECKER_BG = {
   backgroundImage:
     'linear-gradient(45deg, hsl(var(--border) / 0.35) 25%, transparent 25%), linear-gradient(-45deg, hsl(var(--border) / 0.35) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, hsl(var(--border) / 0.35) 75%), linear-gradient(-45deg, transparent 75%, hsl(var(--border) / 0.35) 75%)',
@@ -91,8 +90,8 @@ const CHECKER_BG = {
 function buildMemeFont(el: Pick<MemeTextElement, 'font' | 'bold' | 'italic'>, px: number) {
   const weight = el.bold ? '700' : '400'
   const style = el.italic ? 'italic ' : ''
-  const fam = el.font || 'Impact'
-  return `${style}${weight} ${px}px "${fam}", Impact, sans-serif`
+  const fam = resolveMemeFont(el.font)
+  return `${style}${weight} ${px}px "${fam}", sans-serif`
 }
 
 function uid(prefix: string) {
@@ -105,7 +104,7 @@ function makeElement(patch: Partial<MemeTextElement> = {}): MemeTextElement {
     text: 'Write your text here',
     x: 0.5,
     y: 0.12,
-    font: 'Impact',
+    font: DEFAULT_MEME_FONT,
     sizePx: 0,
     color: '#ffffff',
     strokeColor: '#000000',
@@ -120,7 +119,34 @@ function makeElement(patch: Partial<MemeTextElement> = {}): MemeTextElement {
 }
 
 function makeMemeState(): MemeState {
-  return { mode: 'inside', elements: [makeElement()] }
+  return { mode: 'inside', bars: 'both', elements: [makeElement()] }
+}
+
+/** Which white bars + final canvas height for a state — mirrors the worker. */
+function memeLayout(
+  state: Pick<MemeState, 'mode' | 'bars'>,
+  imgH: number
+): { top: number; bot: number; H: number } {
+  const bar = state.mode === 'outside' ? Math.round(imgH * MEME_BAR_FRAC) : 0
+  const bars = state.bars || 'both'
+  const top =
+    state.mode === 'outside' && (bars === 'top' || bars === 'both') ? bar : 0
+  const bot =
+    state.mode === 'outside' && (bars === 'bottom' || bars === 'both') ? bar : 0
+  return { top, bot, H: imgH + top + bot }
+}
+
+/** Remap element ys between two layouts so text stays glued to the image. */
+function remapY<T extends { y: number }>(
+  els: T[],
+  from: { top: number; H: number },
+  to: { top: number; H: number }
+): T[] {
+  return els.map((el) => {
+    const abs = el.y * from.H - from.top
+    const y = (to.top + abs) / to.H
+    return { ...el, y: Math.min(0.99, Math.max(0.01, y)) }
+  })
 }
 
 interface ImageMeta {
@@ -229,6 +255,7 @@ function MemePreview({
   file,
   state,
   activeElementId,
+  fontsReady,
   onSelect,
   onMove,
   onMetrics,
@@ -236,6 +263,7 @@ function MemePreview({
   file: File
   state: MemeState
   activeElementId: string | null
+  fontsReady: boolean
   onSelect: (id: string | null) => void
   onMove: (id: string, x: number, y: number) => void
   onMetrics: (m: Record<string, number>) => void
@@ -272,16 +300,15 @@ function MemePreview({
     if (!ctx) return
     const W = baseImg.naturalWidth || 1
     const imgH = baseImg.naturalHeight || 1
-    const bar = state.mode === 'outside' ? Math.round(imgH * MEME_BAR_FRAC) : 0
-    const H = imgH + bar * 2
+    const { top, bot, H } = memeLayout(state, imgH)
     canvas.width = W
     canvas.height = H
     ctx.clearRect(0, 0, W, H)
-    if (bar > 0 || file.type === 'image/jpeg') {
+    if (top + bot > 0 || file.type === 'image/jpeg') {
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(0, 0, W, H)
     }
-    ctx.drawImage(baseImg, 0, bar)
+    ctx.drawImage(baseImg, 0, top)
 
     const layouts: Record<string, ElementLayout> = {}
     const metrics: Record<string, number> = {}
@@ -310,7 +337,8 @@ function MemePreview({
       ctx.restore()
     }
     onMetrics(metrics)
-  }, [baseImg, state, activeElementId, file, onMetrics])
+    /* fontsReady is a redraw trigger only (bundled fonts change metrics). */
+  }, [baseImg, state, activeElementId, file, fontsReady, onMetrics])
 
   const toCanvas = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current!
@@ -437,16 +465,16 @@ function ElementCard({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {MEME_FONTS.map((f) => (
-                <SelectItem key={f} value={f}>
+              {MEME_FONT_FAMILIES.map((f) => (
+                <SelectItem key={f} value={f} style={{ fontFamily: `"${f}", sans-serif` }}>
                   {f}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           <p className="text-[11px] leading-snug text-muted-foreground">
-            Classic memes use Impact — devices without it fall back to the
-            closest bold font, identically in preview and output.
+            Every font ships with the app — each one renders for real,
+            identically in the preview and the downloaded meme on any device.
           </p>
         </div>
 
@@ -566,7 +594,21 @@ export function MemeMakerView({
   const [activeImageId, setActiveImageId] = React.useState<string | null>(null)
   const [activeElementId, setActiveElementId] = React.useState<string | null>(null)
   const [metrics, setMetrics] = React.useState<Record<string, number>>({})
+  const [fontsReady, setFontsReady] = React.useState(false)
   const urlsRef = React.useRef<Record<string, string>>({})
+
+  /* Load the bundled meme fonts once; redraw when they arrive. */
+  React.useEffect(() => {
+    let cancelled = false
+    ensureMemeFonts()
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setFontsReady(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   /* ---------------- Load image metadata (size + object URL) ------------- */
   React.useEffect(() => {
@@ -716,6 +758,26 @@ export function MemeMakerView({
     setActiveElementId(el.id)
   }
 
+  /** Add a caption pre-centred in the top/bottom bar (enables it if off). */
+  const addTextAt = (which: 'top' | 'bottom') => {
+    if (!activeFile || !activeState) return
+    const imgH = (meta[activeFile.id]?.height ?? 1) || 1
+    const from = memeLayout(activeState, imgH)
+    let bars = activeState.bars || 'both'
+    if (bars !== 'both' && bars !== which) bars = 'both'
+    const target = { mode: 'outside' as const, bars }
+    const to = memeLayout(target, imgH)
+    const elements = remapY(activeState.elements, from, to)
+    const y =
+      which === 'top' ? to.top / 2 / to.H : (to.top + imgH + to.bot / 2) / to.H
+    const el = makeElement({
+      text: which === 'top' ? 'Top text' : 'Bottom text',
+      y: Math.min(0.98, Math.max(0.02, y)),
+    })
+    patchActive({ ...target, elements: [...elements, el] })
+    setActiveElementId(el.id)
+  }
+
   const duplicateElement = () => {
     if (!activeElement || !activeState) return
     const el = makeElement({
@@ -737,15 +799,24 @@ export function MemeMakerView({
   const toggleMode = (mode: 'inside' | 'outside') => {
     if (!activeFile || !activeState || activeState.mode === mode) return
     const imgH = (meta[activeFile.id]?.height ?? 1) || 1
-    const bar = Math.round(imgH * MEME_BAR_FRAC)
-    const total = imgH + bar * 2
-    const elements = activeState.elements.map((el) => {
-      let y = el.y
-      if (mode === 'outside') y = (bar + el.y * imgH) / total
-      else y = (el.y * total - bar) / imgH
-      return { ...el, y: Math.min(0.99, Math.max(0.01, y)) }
-    })
-    patchActive({ mode, elements })
+    const from = memeLayout(activeState, imgH)
+    const to = memeLayout({ ...activeState, mode }, imgH)
+    patchActive({ mode, elements: remapY(activeState.elements, from, to) })
+  }
+
+  /** Which white caption bars exist while in 'outside' mode. */
+  const setBars = (bars: 'top' | 'bottom' | 'both') => {
+    if (
+      !activeFile ||
+      !activeState ||
+      activeState.mode !== 'outside' ||
+      (activeState.bars || 'both') === bars
+    )
+      return
+    const imgH = (meta[activeFile.id]?.height ?? 1) || 1
+    const from = memeLayout(activeState, imgH)
+    const to = memeLayout({ ...activeState, bars }, imgH)
+    patchActive({ bars, elements: remapY(activeState.elements, from, to) })
   }
 
   const elementLabel = (el: MemeTextElement, i: number) =>
@@ -782,8 +853,8 @@ export function MemeMakerView({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {MEME_FONTS.map((f) => (
-                      <SelectItem key={f} value={f}>
+                    {MEME_FONT_FAMILIES.map((f) => (
+                      <SelectItem key={f} value={f} style={{ fontFamily: `"${f}", sans-serif` }}>
                         {f}
                       </SelectItem>
                     ))}
@@ -858,6 +929,7 @@ export function MemeMakerView({
                 file={activeFile.file}
                 state={activeState}
                 activeElementId={activeElementId}
+                fontsReady={fontsReady}
                 onSelect={setActiveElementId}
                 onMove={moveElement}
                 onMetrics={handleMetrics}
@@ -971,15 +1043,48 @@ export function MemeMakerView({
               ))}
             </div>
             <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
-              &ldquo;Outside&rdquo; adds classic white bars above and below the
-              image; your text stays glued to the picture.
+              &ldquo;Outside&rdquo; adds a classic white caption bar — pick
+              top, bottom or both. Your text stays glued to the picture while
+              the bars change.
             </p>
 
-            <div className="mt-3 grid gap-2">
+            {/* Top / Bottom / Both caption bars (outside mode only) */}
+            {activeState?.mode === 'outside' && (
+              <div className="mt-2">
+                <Label className="text-xs font-medium">Caption bars</Label>
+                <div className="mt-1.5 grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      ['top', 'Top'],
+                      ['bottom', 'Bottom'],
+                      ['both', 'Both'],
+                    ] as const
+                  ).map(([b, label]) => (
+                    <button
+                      key={b}
+                      type="button"
+                      onClick={() => setBars(b)}
+                      aria-label={`${label} caption bar${b === 'both' ? 's' : ''}`}
+                      aria-pressed={(activeState.bars || 'both') === b}
+                      className={cn(
+                        'rounded-lg border px-2 py-2 text-xs font-medium transition-colors',
+                        (activeState.bars || 'both') === b
+                          ? 'border-primary bg-primary/5 text-foreground'
+                          : 'border-border bg-card text-muted-foreground hover:border-primary/40'
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-3 grid grid-cols-2 gap-2">
               <button
                 type="button"
                 onClick={onAddMore}
-                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+                className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
               >
                 <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
                   <ImagePlus className="h-4 w-4" />
@@ -989,13 +1094,37 @@ export function MemeMakerView({
               <button
                 type="button"
                 onClick={addElement}
-                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+                className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
               >
                 <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
                   <Type className="h-4 w-4" />
                 </span>
                 Add text
               </button>
+              {activeState?.mode === 'outside' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => addTextAt('top')}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+                  >
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                      <ArrowUpToLine className="h-4 w-4" />
+                    </span>
+                    Top text
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => addTextAt('bottom')}
+                    className="flex items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+                  >
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+                      <ArrowDownToLine className="h-4 w-4" />
+                    </span>
+                    Bottom text
+                  </button>
+                </>
+              )}
             </div>
 
             {activeState && activeState.elements.length > 0 && (

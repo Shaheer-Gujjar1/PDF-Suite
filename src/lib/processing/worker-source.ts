@@ -2124,21 +2124,56 @@ processors['rotate-images'] = async function (inputs, opts, onProgress, log) {
 };
 
 /* ---- Meme Maker (caption editor) ----------------------------------------- */
-/* opts.memes: { [fileName]: { mode: 'inside'|'outside', elements: [...] } }. */
+/* opts.memes: { [fileName]: { mode: 'inside'|'outside', bars, elements } }.  */
 /* Element coords are normalized to the FINAL canvas (bars included).         */
-/* 'outside' adds white bars top+bottom (BAR fraction of image height each).  */
-/* Classic meme style: Impact stack, white fill, black stroke, ALL-CAPS.      */
+/* 'outside' adds white caption bars: cfg.bars = 'top'|'bottom'|'both' picks  */
+/* which ones exist (default 'both').                                         */
+/* opts.fonts: [{ family, weight, data:ArrayBuffer }] — bundled font faces    */
+/* fetched by the main thread (src/lib/meme-fonts.ts). They are registered in */
+/* the worker via FontFace + self.fonts so every font renders identically to  */
+/* the preview. Classic style: Anton stack, white fill, black stroke, CAPS.   */
 /* drawMemeText mirrors the live-preview renderer in meme-maker-view.tsx —    */
 /* keep the math in sync (font stack, auto-fit, line height, stroke, rules).  */
 var MEME_BAR_FRAC = 0.16;
 var MEME_LINE_H = 1.15;
 var MEME_FIT_W = 0.92;
+var MEME_DEFAULT_FONT = 'Anton';
+/* Legacy system-font names saved before fonts were bundled — keep in sync   */
+/* with LEGACY_FONT_MAP in src/lib/meme-fonts.ts.                            */
+var MEME_FONT_LEGACY = {
+  'Impact': 'Anton',
+  'Arial Black': 'Archivo Black',
+  'Comic Sans MS': 'Comic Neue',
+  'Verdana': 'DejaVu Sans',
+  'Trebuchet MS': 'DejaVu Sans',
+  'Georgia': 'Tinos',
+  'Times New Roman': 'Tinos',
+  'Courier New': 'Liberation Mono'
+};
+
+var WORKER_FONTS_ADDED = {};
+async function ensureMemeFontsLoaded(fonts) {
+  if (!fonts || !fonts.length || typeof FontFace === 'undefined' || !self.fonts) return;
+  var jobs = [];
+  for (var i = 0; i < fonts.length; i++) {
+    var f = fonts[i];
+    if (!f || !f.family || !f.data) continue;
+    var key = f.family + '/' + (f.weight || '400');
+    if (WORKER_FONTS_ADDED[key]) continue;
+    WORKER_FONTS_ADDED[key] = true;
+    var face = new FontFace(f.family, f.data, { weight: f.weight || '400' });
+    self.fonts.add(face);
+    jobs.push(face.load());
+  }
+  try { await Promise.all(jobs); } catch (e) { /* fall back to generic fonts */ }
+}
 
 function buildMemeFont(el, px) {
   var weight = el.bold ? '700' : '400';
   var style = el.italic ? 'italic ' : '';
-  var fam = el.font || 'Impact';
-  return style + weight + ' ' + px + 'px "' + fam + '", Impact, sans-serif';
+  var fam = el.font || MEME_DEFAULT_FONT;
+  if (MEME_FONT_LEGACY[fam]) fam = MEME_FONT_LEGACY[fam];
+  return style + weight + ' ' + px + 'px "' + fam + '", sans-serif';
 }
 
 function drawMemeText(ctx, W, H, el) {
@@ -2192,9 +2227,10 @@ function drawMemeText(ctx, W, H, el) {
 processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
   var memes = (opts && opts.memes) || {};
   var out = [];
+  await ensureMemeFontsLoaded(opts && opts.fonts);
   for (var i = 0; i < inputs.length; i++) {
     var input = inputs[i];
-    var cfg = memes[input.fileName] || { mode: 'inside', elements: [] };
+    var cfg = memes[input.fileName] || { mode: 'inside', bars: 'both', elements: [] };
     var elements = cfg.elements || [];
     log('Making meme ' + input.fileName + ' (' + elements.length + ' text layer' + (elements.length === 1 ? '' : 's') + ')');
     var blob = new Blob([input.data], { type: guessMime(input.fileName) });
@@ -2207,8 +2243,11 @@ processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
       );
     }
     var w = bmp.width;
+    var barsCfg = cfg.bars || 'both';
     var bar = cfg.mode === 'outside' ? Math.round(bmp.height * MEME_BAR_FRAC) : 0;
-    var h = bmp.height + bar * 2;
+    var topBar = cfg.mode === 'outside' && (barsCfg === 'top' || barsCfg === 'both') ? bar : 0;
+    var botBar = cfg.mode === 'outside' && (barsCfg === 'bottom' || barsCfg === 'both') ? bar : 0;
+    var h = bmp.height + topBar + botBar;
     var lower = (input.fileName || '').toLowerCase();
     var isJpg = /\\.jpe?g$/.test(lower);
     var isWebp = /\\.webp$/.test(lower);
@@ -2216,12 +2255,12 @@ processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
     var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
     var canvas = new OffscreenCanvas(w, h);
     var ctx = canvas.getContext('2d');
-    if (mime === 'image/jpeg' || bar > 0) {
-      /* JPEG has no alpha; outside mode paints the white bars. */
+    if (mime === 'image/jpeg' || topBar + botBar > 0) {
+      /* JPEG has no alpha; outside mode paints the white caption bars. */
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
     }
-    ctx.drawImage(bmp, 0, bar);
+    ctx.drawImage(bmp, 0, topBar);
     if (bmp.close) bmp.close();
     for (var e = 0; e < elements.length; e++) {
       drawMemeText(ctx, w, h, elements[e]);
@@ -2232,7 +2271,7 @@ processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
       name: stripExt(input.fileName) + '-meme.' + ext,
       data: buf,
       mime: mime,
-      note: w + 'x' + h + ' px · ' + elements.length + ' text' + (elements.length === 1 ? '' : 's') + (bar > 0 ? ' · outside' : ''),
+      note: w + 'x' + h + ' px · ' + elements.length + ' text' + (elements.length === 1 ? '' : 's') + (cfg.mode === 'outside' ? ' · outside ' + barsCfg : ''),
     });
     onProgress((i + 1) / inputs.length);
   }

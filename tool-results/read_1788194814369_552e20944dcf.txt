@@ -1,0 +1,1084 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import * as React from 'react'
+     4→     4→import {
+     5→     5→  AlignCenter,
+     6→     6→  AlignLeft,
+     7→     7→  AlignRight,
+     8→     8→  Bold,
+     9→     9→  CaseUpper,
+    10→    10→  Copy,
+    11→    11→  ImagePlus,
+    12→    12→  Italic,
+    13→    13→  Laugh,
+    14→    14→  Loader2,
+    15→    15→  Plus,
+    16→    16→  Trash2,
+    17→    17→  Type,
+    18→    18→  Underline,
+    19→    19→  X,
+    20→    20→} from 'lucide-react'
+    21→    21→import { Button } from '@/components/ui/button'
+    22→    22→import { Label } from '@/components/ui/label'
+    23→    23→import { Slider } from '@/components/ui/slider'
+    24→    24→import { Switch } from '@/components/ui/switch'
+    25→    25→import {
+    26→    26→  Select,
+    27→    27→  SelectContent,
+    28→    28→  SelectItem,
+    29→    29→  SelectTrigger,
+    30→    30→  SelectValue,
+    31→    31→} from '@/components/ui/select'
+    32→    32→import { cn } from '@/lib/utils'
+    33→    33→
+    34→    34→/* ------------------------------------------------------------------------ */
+    35→    35→/* Types & shared constants — the render math mirrors worker-source.ts       */
+    36→    36→/* (`processors['meme-maker']`); keep MEME_* + draw logic in sync.           */
+    37→    37→/* ------------------------------------------------------------------------ */
+    38→    38→
+    39→    39→export interface MemeTextElement {
+    40→    40→  id: string
+    41→    41→  text: string
+    42→    42→  /** 0..1 of the FINAL canvas (white bars included). */
+    43→    43→  x: number
+    44→    44→  y: number
+    45→    45→  font: string
+    46→    46→  /** Absolute px; 0 = auto-fit to 92% canvas width. */
+    47→    47→  sizePx: number
+    48→    48→  color: string
+    49→    49→  strokeColor: string
+    50→    50→  /** Outline width as a fraction of font size (0..0.5). */
+    51→    51→  strokeWidth: number
+    52→    52→  bold: boolean
+    53→    53→  italic: boolean
+    54→    54→  underline: boolean
+    55→    55→  caps: boolean
+    56→    56→  align: 'left' | 'center' | 'right'
+    57→    57→}
+    58→    58→
+    59→    59→export interface MemeState {
+    60→    60→  mode: 'inside' | 'outside'
+    61→    61→  elements: MemeTextElement[]
+    62→    62→}
+    63→    63→
+    64→    64→export interface MemeMakerResult {
+    65→    65→  /** Per-image meme state, keyed by file name (matches worker lookup). */
+    66→    66→  memes: Record<string, MemeState>
+    67→    67→}
+    68→    68→
+    69→    69→const MEME_BAR_FRAC = 0.16
+    70→    70→const MEME_LINE_H = 1.15
+    71→    71→const MEME_FIT_W = 0.92
+    72→    72→
+    73→    73→const MEME_FONTS = [
+    74→    74→  'Impact',
+    75→    75→  'Arial Black',
+    76→    76→  'Comic Sans MS',
+    77→    77→  'Verdana',
+    78→    78→  'Trebuchet MS',
+    79→    79→  'Georgia',
+    80→    80→  'Times New Roman',
+    81→    81→  'Courier New',
+    82→    82→]
+    83→    83→
+    84→    84→const CHECKER_BG = {
+    85→    85→  backgroundImage:
+    86→    86→    'linear-gradient(45deg, hsl(var(--border) / 0.35) 25%, transparent 25%), linear-gradient(-45deg, hsl(var(--border) / 0.35) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, hsl(var(--border) / 0.35) 75%), linear-gradient(-45deg, transparent 75%, hsl(var(--border) / 0.35) 75%)',
+    87→    87→  backgroundSize: '20px 20px',
+    88→    88→  backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0px',
+    89→    89→}
+    90→    90→
+    91→    91→function buildMemeFont(el: Pick<MemeTextElement, 'font' | 'bold' | 'italic'>, px: number) {
+    92→    92→  const weight = el.bold ? '700' : '400'
+    93→    93→  const style = el.italic ? 'italic ' : ''
+    94→    94→  const fam = el.font || 'Impact'
+    95→    95→  return `${style}${weight} ${px}px "${fam}", Impact, sans-serif`
+    96→    96→}
+    97→    97→
+    98→    98→function uid(prefix: string) {
+    99→    99→  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+   100→   100→}
+   101→   101→
+   102→   102→function makeElement(patch: Partial<MemeTextElement> = {}): MemeTextElement {
+   103→   103→  return {
+   104→   104→    id: uid('el'),
+   105→   105→    text: 'Write your text here',
+   106→   106→    x: 0.5,
+   107→   107→    y: 0.12,
+   108→   108→    font: 'Impact',
+   109→   109→    sizePx: 0,
+   110→   110→    color: '#ffffff',
+   111→   111→    strokeColor: '#000000',
+   112→   112→    strokeWidth: 0.09,
+   113→   113→    bold: false,
+   114→   114→    italic: false,
+   115→   115→    underline: false,
+   116→   116→    caps: true,
+   117→   117→    align: 'center',
+   118→   118→    ...patch,
+   119→   119→  }
+   120→   120→}
+   121→   121→
+   122→   122→function makeMemeState(): MemeState {
+   123→   123→  return { mode: 'inside', elements: [makeElement()] }
+   124→   124→}
+   125→   125→
+   126→   126→interface ImageMeta {
+   127→   127→  url: string
+   128→   128→  width: number
+   129→   129→  height: number
+   130→   130→}
+   131→   131→
+   132→   132→interface ElementLayout {
+   133→   133→  px: number
+   134→   134→  boxes: { x: number; y: number; w: number; h: number }[]
+   135→   135→  bbox: { x: number; y: number; w: number; h: number }
+   136→   136→}
+   137→   137→
+   138→   138→/** Compute size/position of one element on the FINAL canvas — mirrors
+   139→   139→ *  drawMemeText in worker-source.ts exactly. */
+   140→   140→function layoutMemeElement(
+   141→   141→  ctx: CanvasRenderingContext2D,
+   142→   142→  W: number,
+   143→   143→  H: number,
+   144→   144→  el: MemeTextElement
+   145→   145→): ElementLayout | null {
+   146→   146→  const raw = el.text || ''
+   147→   147→  if (!raw.replace(/\s/g, '')) return null
+   148→   148→  const txt = el.caps ? raw.toUpperCase() : raw
+   149→   149→  const lines = txt.split('\n')
+   150→   150→  let px: number
+   151→   151→  if (!el.sizePx || el.sizePx <= 0) {
+   152→   152→    px = Math.max(14, Math.round(W / 8))
+   153→   153→    ctx.font = buildMemeFont(el, px)
+   154→   154→    let maxw = 0
+   155→   155→    for (const line of lines) maxw = Math.max(maxw, ctx.measureText(line).width)
+   156→   156→    if (maxw > W * MEME_FIT_W && maxw > 0) px = Math.max(12, Math.floor(px * ((W * MEME_FIT_W) / maxw)))
+   157→   157→  } else {
+   158→   158→    px = el.sizePx
+   159→   159→  }
+   160→   160→  ctx.font = buildMemeFont(el, px)
+   161→   161→  ctx.textAlign = el.align || 'center'
+   162→   162→  ctx.textBaseline = 'alphabetic'
+   163→   163→  const lh = px * MEME_LINE_H
+   164→   164→  const blockH = lines.length * lh
+   165→   165→  const ax = el.x * W
+   166→   166→  const y0 = el.y * H - blockH / 2 + lh / 2 + px * 0.35
+   167→   167→  const boxes: ElementLayout['boxes'] = []
+   168→   168→  for (let i = 0; i < lines.length; i++) {
+   169→   169→    const line = lines[i]
+   170→   170→    if (!line) continue
+   171→   171→    const w = ctx.measureText(line).width
+   172→   172→    const lx = el.align === 'left' ? ax : el.align === 'right' ? ax - w : ax - w / 2
+   173→   173→    boxes.push({ x: lx - px * 0.1, y: y0 + i * lh - px * 0.9, w: w + px * 0.2, h: lh })
+   174→   174→  }
+   175→   175→  const bbox = boxes.length
+   176→   176→    ? {
+   177→   177→        x: Math.min(...boxes.map((b) => b.x)),
+   178→   178→        y: Math.min(...boxes.map((b) => b.y)),
+   179→   179→        w: Math.max(...boxes.map((b) => b.x + b.w)) - Math.min(...boxes.map((b) => b.x)),
+   180→   180→        h: Math.max(...boxes.map((b) => b.y + b.h)) - Math.min(...boxes.map((b) => b.y)),
+   181→   181→      }
+   182→   182→    : { x: ax - px, y: y0 - px, w: px * 2, h: blockH }
+   183→   183→  return { px, boxes, bbox }
+   184→   184→}
+   185→   185→
+   186→   186→function paintMemeElement(
+   187→   187→  ctx: CanvasRenderingContext2D,
+   188→   188→  W: number,
+   189→   189→  H: number,
+   190→   190→  el: MemeTextElement
+   191→   191→): ElementLayout | null {
+   192→   192→  const lay = layoutMemeElement(ctx, W, H, el)
+   193→   193→  if (!lay) return null
+   194→   194→  const raw = el.text || ''
+   195→   195→  const txt = el.caps ? raw.toUpperCase() : raw
+   196→   196→  const lines = txt.split('\n')
+   197→   197→  const lh = lay.px * MEME_LINE_H
+   198→   198→  const ax = el.x * W
+   199→   199→  const y0 = el.y * H - lines.length * lh / 2 + lh / 2 + lay.px * 0.35
+   200→   200→  const sw = (el.strokeWidth || 0) * lay.px
+   201→   201→  ctx.font = buildMemeFont(el, lay.px)
+   202→   202→  ctx.textAlign = el.align || 'center'
+   203→   203→  ctx.textBaseline = 'alphabetic'
+   204→   204→  for (let i = 0; i < lines.length; i++) {
+   205→   205→    const ly = y0 + i * lh
+   206→   206→    if (!lines[i]) continue
+   207→   207→    if (sw > 0) {
+   208→   208→      ctx.lineJoin = 'round'
+   209→   209→      ctx.miterLimit = 2
+   210→   210→      ctx.lineWidth = sw
+   211→   211→      ctx.strokeStyle = el.strokeColor || '#000000'
+   212→   212→      ctx.strokeText(lines[i], ax, ly)
+   213→   213→    }
+   214→   214→    ctx.fillStyle = el.color || '#ffffff'
+   215→   215→    ctx.fillText(lines[i], ax, ly)
+   216→   216→    if (el.underline) {
+   217→   217→      const wU = ctx.measureText(lines[i]).width
+   218→   218→      const ux = el.align === 'left' ? ax : el.align === 'right' ? ax - wU : ax - wU / 2
+   219→   219→      ctx.fillRect(ux, ly + lay.px * 0.12, wU, Math.max(2, lay.px * 0.06))
+   220→   220→    }
+   221→   221→  }
+   222→   222→  return lay
+   223→   223→}
+   224→   224→
+   225→   225→/* ------------------------------------------------------------------------ */
+   226→   226→/* Live preview canvas with drag-to-position                                 */
+   227→   227→/* ------------------------------------------------------------------------ */
+   228→   228→function MemePreview({
+   229→   229→  file,
+   230→   230→  state,
+   231→   231→  activeElementId,
+   232→   232→  onSelect,
+   233→   233→  onMove,
+   234→   234→  onMetrics,
+   235→   235→}: {
+   236→   236→  file: File
+   237→   237→  state: MemeState
+   238→   238→  activeElementId: string | null
+   239→   239→  onSelect: (id: string | null) => void
+   240→   240→  onMove: (id: string, x: number, y: number) => void
+   241→   241→  onMetrics: (m: Record<string, number>) => void
+   242→   242→}) {
+   243→   243→  const canvasRef = React.useRef<HTMLCanvasElement>(null)
+   244→   244→  const [baseImg, setBaseImg] = React.useState<HTMLImageElement | null>(null)
+   245→   245→  const layoutsRef = React.useRef<Record<string, ElementLayout>>({})
+   246→   246→  const dragRef = React.useRef<{ id: string; dx: number; dy: number } | null>(null)
+   247→   247→
+   248→   248→  /* Load the base image. */
+   249→   249→  React.useEffect(() => {
+   250→   250→    let cancelled = false
+   251→   251→    setBaseImg(null)
+   252→   252→    const url = URL.createObjectURL(file)
+   253→   253→    const img = new Image()
+   254→   254→    img.onload = () => {
+   255→   255→      if (!cancelled) setBaseImg(img)
+   256→   256→    }
+   257→   257→    img.onerror = () => {
+   258→   258→      if (!cancelled) setBaseImg(null)
+   259→   259→    }
+   260→   260→    img.src = url
+   261→   261→    return () => {
+   262→   262→      cancelled = true
+   263→   263→      URL.revokeObjectURL(url)
+   264→   264→    }
+   265→   265→  }, [file])
+   266→   266→
+   267→   267→  /* Redraw on any change. */
+   268→   268→  React.useEffect(() => {
+   269→   269→    const canvas = canvasRef.current
+   270→   270→    if (!canvas || !baseImg) return
+   271→   271→    const ctx = canvas.getContext('2d')
+   272→   272→    if (!ctx) return
+   273→   273→    const W = baseImg.naturalWidth || 1
+   274→   274→    const imgH = baseImg.naturalHeight || 1
+   275→   275→    const bar = state.mode === 'outside' ? Math.round(imgH * MEME_BAR_FRAC) : 0
+   276→   276→    const H = imgH + bar * 2
+   277→   277→    canvas.width = W
+   278→   278→    canvas.height = H
+   279→   279→    ctx.clearRect(0, 0, W, H)
+   280→   280→    if (bar > 0 || file.type === 'image/jpeg') {
+   281→   281→      ctx.fillStyle = '#ffffff'
+   282→   282→      ctx.fillRect(0, 0, W, H)
+   283→   283→    }
+   284→   284→    ctx.drawImage(baseImg, 0, bar)
+   285→   285→
+   286→   286→    const layouts: Record<string, ElementLayout> = {}
+   287→   287→    const metrics: Record<string, number> = {}
+   288→   288→    for (const el of state.elements) {
+   289→   289→      const lay = paintMemeElement(ctx, W, H, el)
+   290→   290→      if (lay) {
+   291→   291→        layouts[el.id] = lay
+   292→   292→        metrics[el.id] = lay.px
+   293→   293→      }
+   294→   294→    }
+   295→   295→    layoutsRef.current = layouts
+   296→   296→
+   297→   297→    /* Selection outline for the active element (preview only). */
+   298→   298→    const active = activeElementId ? layouts[activeElementId] : null
+   299→   299→    if (active) {
+   300→   300→      ctx.save()
+   301→   301→      ctx.setLineDash([6, 4])
+   302→   302→      ctx.lineWidth = Math.max(2, Math.round(W / 400))
+   303→   303→      ctx.strokeStyle = 'rgba(139, 92, 246, 0.95)'
+   304→   304→      ctx.strokeRect(
+   305→   305→        active.bbox.x - 6,
+   306→   306→        active.bbox.y - 6,
+   307→   307→        active.bbox.w + 12,
+   308→   308→        active.bbox.h + 12
+   309→   309→      )
+   310→   310→      ctx.restore()
+   311→   311→    }
+   312→   312→    onMetrics(metrics)
+   313→   313→  }, [baseImg, state, activeElementId, file, onMetrics])
+   314→   314→
+   315→   315→  const toCanvas = (e: React.PointerEvent<HTMLCanvasElement>) => {
+   316→   316→    const canvas = canvasRef.current!
+   317→   317→    const rect = canvas.getBoundingClientRect()
+   318→   318→    return {
+   319→   319→      cx: ((e.clientX - rect.left) * canvas.width) / rect.width,
+   320→   320→      cy: ((e.clientY - rect.top) * canvas.height) / rect.height,
+   321→   321→    }
+   322→   322→  }
+   323→   323→
+   324→   324→  const hitTest = (cx: number, cy: number) => {
+   325→   325→    const pad = 10
+   326→   326→    const entries = state.elements.filter((el) => layoutsRef.current[el.id])
+   327→   327→    for (let i = entries.length - 1; i >= 0; i--) {
+   328→   328→      const el = entries[i]
+   329→   329→      const lay = layoutsRef.current[el.id]
+   330→   330→      const inBox =
+   331→   331→        cx >= lay.bbox.x - pad &&
+   332→   332→        cx <= lay.bbox.x + lay.bbox.w + pad &&
+   333→   333→        cy >= lay.bbox.y - pad &&
+   334→   334→        cy <= lay.bbox.y + lay.bbox.h + pad
+   335→   335→      if (inBox) return el
+   336→   336→    }
+   337→   337→    return null
+   338→   338→  }
+   339→   339→
+   340→   340→  return (
+   341→   341→    <div className="overflow-hidden rounded-2xl border border-border/60" style={CHECKER_BG}>
+   342→   342→      {baseImg ? (
+   343→   343→        <canvas
+   344→   344→          ref={canvasRef}
+   345→   345→          className="mx-auto block h-auto max-h-[560px] w-auto max-w-full cursor-move touch-none select-none"
+   346→   346→          onPointerDown={(e) => {
+   347→   347→            const { cx, cy } = toCanvas(e)
+   348→   348→            const hit = hitTest(cx, cy)
+   349→   349→            if (hit) {
+   350→   350→              onSelect(hit.id)
+   351→   351→              const canvas = canvasRef.current!
+   352→   352→              dragRef.current = {
+   353→   353→                id: hit.id,
+   354→   354→                dx: cx - hit.x * canvas.width,
+   355→   355→                dy: cy - hit.y * canvas.height,
+   356→   356→              }
+   357→   357→              canvas.setPointerCapture(e.pointerId)
+   358→   358→            } else {
+   359→   359→              onSelect(null)
+   360→   360→            }
+   361→   361→          }}
+   362→   362→          onPointerMove={(e) => {
+   363→   363→            const drag = dragRef.current
+   364→   364→            if (!drag) return
+   365→   365→            const { cx, cy } = toCanvas(e)
+   366→   366→            const canvas = canvasRef.current!
+   367→   367→            const nx = Math.min(0.98, Math.max(0.02, (cx - drag.dx) / canvas.width))
+   368→   368→            const ny = Math.min(0.99, Math.max(0.01, (cy - drag.dy) / canvas.height))
+   369→   369→            onMove(drag.id, nx, ny)
+   370→   370→          }}
+   371→   371→          onPointerUp={() => {
+   372→   372→            dragRef.current = null
+   373→   373→          }}
+   374→   374→          onPointerCancel={() => {
+   375→   375→            dragRef.current = null
+   376→   376→          }}
+   377→   377→        />
+   378→   378→      ) : (
+   379→   379→        <div className="grid h-64 place-items-center">
+   380→   380→          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+   381→   381→        </div>
+   382→   382→      )}
+   383→   383→    </div>
+   384→   384→  )
+   385→   385→}
+   386→   386→
+   387→   387→/* ------------------------------------------------------------------------ */
+   388→   388→/* Active element editor (sidebar)                                           */
+   389→   389→/* ------------------------------------------------------------------------ */
+   390→   390→function ElementCard({
+   391→   391→  el,
+   392→   392→  effectivePx,
+   393→   393→  onChange,
+   394→   394→  onRemove,
+   395→   395→}: {
+   396→   396→  el: MemeTextElement
+   397→   397→  effectivePx: number
+   398→   398→  onChange: (patch: Partial<MemeTextElement>) => void
+   399→   399→  onRemove: () => void
+   400→   400→}) {
+   401→   401→  return (
+   402→   402→    <div className="rounded-2xl border border-border/70 bg-card p-4">
+   403→   403→      <div className="flex items-center justify-between">
+   404→   404→        <p className="flex items-center gap-2 text-sm font-semibold">
+   405→   405→          <Type className="h-4 w-4 text-primary" />
+   406→   406→          Text settings
+   407→   407→        </p>
+   408→   408→        <Button
+   409→   409→          type="button"
+   410→   410→          variant="ghost"
+   411→   411→          size="sm"
+   412→   412→          onClick={onRemove}
+   413→   413→          className="h-8 text-muted-foreground hover:text-destructive"
+   414→   414→          aria-label="Delete this text"
+   415→   415→        >
+   416→   416→          <Trash2 className="mr-1 h-3.5 w-3.5" />
+   417→   417→          Delete
+   418→   418→        </Button>
+   419→   419→      </div>
+   420→   420→
+   421→   421→      <div className="mt-3 space-y-4">
+   422→   422→        <div className="space-y-1.5">
+   423→   423→          <Label className="text-xs font-medium">Text (Enter for a new line)</Label>
+   424→   424→          <textarea
+   425→   425→            value={el.text}
+   426→   426→            onChange={(e) => onChange({ text: e.target.value })}
+   427→   427→            rows={2}
+   428→   428→            className="w-full resize-y rounded-xl border border-border bg-background p-3 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
+   429→   429→            aria-label="Meme text"
+   430→   430→          />
+   431→   431→        </div>
+   432→   432→
+   433→   433→        <div className="space-y-1.5">
+   434→   434→          <Label className="text-xs font-medium">Font</Label>
+   435→   435→          <Select value={el.font} onValueChange={(v) => onChange({ font: v })}>
+   436→   436→            <SelectTrigger className="w-full" aria-label="Font family">
+   437→   437→              <SelectValue />
+   438→   438→            </SelectTrigger>
+   439→   439→            <SelectContent>
+   440→   440→              {MEME_FONTS.map((f) => (
+   441→   441→                <SelectItem key={f} value={f}>
+   442→   442→                  {f}
+   443→   443→                </SelectItem>
+   444→   444→              ))}
+   445→   445→            </SelectContent>
+   446→   446→          </Select>
+   447→   447→          <p className="text-[11px] leading-snug text-muted-foreground">
+   448→   448→            Classic memes use Impact — devices without it fall back to the
+   449→   449→            closest bold font, identically in preview and output.
+   450→   450→          </p>
+   451→   451→        </div>
+   452→   452→
+   453→   453→        <div className="space-y-2">
+   454→   454→          <div className="flex items-center justify-between">
+   455→   455→            <Label className="text-xs font-medium">Auto-fit size</Label>
+   456→   456→            <Switch
+   457→   457→              checked={el.sizePx === 0}
+   458→   458→              onCheckedChange={(v) => onChange({ sizePx: v ? 0 : Math.max(20, effectivePx || 48) })}
+   459→   459→              aria-label="Automatically fit the text size to the image width"
+   460→   460→            />
+   461→   461→          </div>
+   462→   462→          {el.sizePx > 0 && (
+   463→   463→            <>
+   464→   464→              <Slider
+   465→   465→                value={[el.sizePx]}
+   466→   466→                min={12}
+   467→   467→                max={400}
+   468→   468→                step={2}
+   469→   469→                onValueChange={(v) => onChange({ sizePx: v[0] })}
+   470→   470→                className="w-full"
+   471→   471→                aria-label="Text size in pixels"
+   472→   472→              />
+   473→   473→              <p className="text-[11px] text-muted-foreground">{el.sizePx} px</p>
+   474→   474→            </>
+   475→   475→          )}
+   476→   476→          {el.sizePx === 0 && (
+   477→   477→            <p className="text-[11px] text-muted-foreground">
+   478→   478→              Fits the longest line to 92% of the width — now {effectivePx || '…'} px.
+   479→   479→            </p>
+   480→   480→          )}
+   481→   481→        </div>
+   482→   482→
+   483→   483→        <div className="grid grid-cols-2 gap-3">
+   484→   484→          <div className="space-y-1.5">
+   485→   485→            <Label className="text-xs font-medium">Text color</Label>
+   486→   486→            <input
+   487→   487→              type="color"
+   488→   488→              value={el.color}
+   489→   489→              onChange={(e) => onChange({ color: e.target.value })}
+   490→   490→              className="h-9 w-full cursor-pointer rounded-lg border border-border bg-background p-1"
+   491→   491→              aria-label="Text fill color"
+   492→   492→            />
+   493→   493→          </div>
+   494→   494→          <div className="space-y-1.5">
+   495→   495→            <Label className="text-xs font-medium">Outline color</Label>
+   496→   496→            <input
+   497→   497→              type="color"
+   498→   498→              value={el.strokeColor}
+   499→   499→              onChange={(e) => onChange({ strokeColor: e.target.value })}
+   500→   500→              className="h-9 w-full cursor-pointer rounded-lg border border-border bg-background p-1"
+   501→   501→              aria-label="Text outline color"
+   502→   502→            />
+   503→   503→          </div>
+   504→   504→        </div>
+   505→   505→
+   506→   506→        <div className="space-y-2">
+   507→   507→          <Label className="text-xs font-medium">
+   508→   508→            Outline width · {el.strokeWidth === 0 ? 'none' : `${Math.round((el.strokeWidth || 0) * (effectivePx || 0))} px`}
+   509→   509→          </Label>
+   510→   510→          <Slider
+   511→   511→            value={[el.strokeWidth || 0]}
+   512→   512→            min={0}
+   513→   513→            max={0.3}
+   514→   514→            step={0.01}
+   515→   515→            onValueChange={(v) => onChange({ strokeWidth: v[0] })}
+   516→   516→            className="w-full"
+   517→   517→            aria-label="Outline width as a fraction of text size"
+   518→   518→          />
+   519→   519→        </div>
+   520→   520→
+   521→   521→        <div className="space-y-1.5">
+   522→   522→          <Label className="text-xs font-medium">Alignment</Label>
+   523→   523→          <div className="grid w-[120px] grid-cols-3 overflow-hidden rounded-lg border border-border">
+   524→   524→            {(['left', 'center', 'right'] as const).map((a) => {
+   525→   525→              const Icon = a === 'left' ? AlignLeft : a === 'center' ? AlignCenter : AlignRight
+   526→   526→              return (
+   527→   527→                <button
+   528→   528→                  key={a}
+   529→   529→                  type="button"
+   530→   530→                  onClick={() => onChange({ align: a })}
+   531→   531→                  aria-label={`Align ${a}`}
+   532→   532→                  className={cn(
+   533→   533→                    'grid h-8 place-items-center text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+   534→   534→                    el.align === a && 'bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground'
+   535→   535→                  )}
+   536→   536→                >
+   537→   537→                  <Icon className="h-3.5 w-3.5" />
+   538→   538→                </button>
+   539→   539→              )
+   540→   540→            })}
+   541→   541→          </div>
+   542→   542→        </div>
+   543→   543→      </div>
+   544→   544→    </div>
+   545→   545→  )
+   546→   546→}
+   547→   547→
+   548→   548→/* ------------------------------------------------------------------------ */
+   549→   549→/* Main view — iloveimg-style meme editing studio                            */
+   550→   550→/* ------------------------------------------------------------------------ */
+   551→   551→interface MemeMakerViewProps {
+   552→   552→  files: { id: string; file: File }[]
+   553→   553→  onRemove: (id: string) => void
+   554→   554→  onAddMore: () => void
+   555→   555→  onChange: (result: MemeMakerResult | null) => void
+   556→   556→}
+   557→   557→
+   558→   558→export function MemeMakerView({
+   559→   559→  files,
+   560→   560→  onRemove,
+   561→   561→  onAddMore,
+   562→   562→  onChange,
+   563→   563→}: MemeMakerViewProps) {
+   564→   564→  const [meta, setMeta] = React.useState<Record<string, ImageMeta>>({})
+   565→   565→  const [memes, setMemes] = React.useState<Record<string, MemeState>>({})
+   566→   566→  const [activeImageId, setActiveImageId] = React.useState<string | null>(null)
+   567→   567→  const [activeElementId, setActiveElementId] = React.useState<string | null>(null)
+   568→   568→  const [metrics, setMetrics] = React.useState<Record<string, number>>({})
+   569→   569→  const urlsRef = React.useRef<Record<string, string>>({})
+   570→   570→
+   571→   571→  /* ---------------- Load image metadata (size + object URL) ------------- */
+   572→   572→  React.useEffect(() => {
+   573→   573→    let cancelled = false
+   574→   574→
+   575→   575→    setMeta((prev) => {
+   576→   576→      const next: Record<string, ImageMeta> = {}
+   577→   577→      for (const f of files) {
+   578→   578→        if (prev[f.id]) next[f.id] = prev[f.id]
+   579→   579→      }
+   580→   580→      for (const id of Object.keys(urlsRef.current)) {
+   581→   581→        if (!next[id] && urlsRef.current[id]) {
+   582→   582→          URL.revokeObjectURL(urlsRef.current[id])
+   583→   583→          delete urlsRef.current[id]
+   584→   584→        }
+   585→   585→      }
+   586→   586→      return next
+   587→   587→    })
+   588→   588→
+   589→   589→    const missing = files.filter((f) => !urlsRef.current[f.id])
+   590→   590→    for (const f of missing) {
+   591→   591→      const url = URL.createObjectURL(f.file)
+   592→   592→      urlsRef.current[f.id] = url
+   593→   593→      const img = new Image()
+   594→   594→      img.onload = () => {
+   595→   595→        if (cancelled) return
+   596→   596→        setMeta((prev) => ({
+   597→   597→          ...prev,
+   598→   598→          [f.id]: {
+   599→   599→            url,
+   600→   600→            width: img.naturalWidth || 1,
+   601→   601→            height: img.naturalHeight || 1,
+   602→   602→          },
+   603→   603→        }))
+   604→   604→      }
+   605→   605→      img.onerror = () => {
+   606→   606→        if (cancelled) return
+   607→   607→        setMeta((prev) => ({ ...prev, [f.id]: { url, width: 1, height: 1 } }))
+   608→   608→      }
+   609→   609→      img.src = url
+   610→   610→    }
+   611→   611→
+   612→   612→    return () => {
+   613→   613→      cancelled = true
+   614→   614→    }
+   615→   615→  }, [files])
+   616→   616→
+   617→   617→  // Revoke everything on unmount.
+   618→   618→  React.useEffect(() => {
+   619→   619→    const urls = urlsRef.current
+   620→   620→    return () => {
+   621→   621→      for (const id of Object.keys(urls)) URL.revokeObjectURL(urls[id])
+   622→   622→    }
+   623→   623→  }, [])
+   624→   624→
+   625→   625→  /* ---------------- Initialize state for new files ---------------------- */
+   626→   626→  React.useEffect(() => {
+   627→   627→    setMemes((prev) => {
+   628→   628→      let changed = false
+   629→   629→      const next = { ...prev }
+   630→   630→      for (const f of files) {
+   631→   631→        if (!next[f.id]) {
+   632→   632→          next[f.id] = makeMemeState()
+   633→   633→          changed = true
+   634→   634→        }
+   635→   635→      }
+   636→   636→      for (const id of Object.keys(next)) {
+   637→   637→        if (!files.some((f) => f.id === id)) {
+   638→   638→          delete next[id]
+   639→   639→          changed = true
+   640→   640→        }
+   641→   641→      }
+   642→   642→      return changed ? next : prev
+   643→   643→    })
+   644→   644→  }, [files])
+   645→   645→
+   646→   646→  /* Keep the active image valid. */
+   647→   647→  React.useEffect(() => {
+   648→   648→    if (files.length === 0) {
+   649→   649→      setActiveImageId(null)
+   650→   650→      return
+   651→   651→    }
+   652→   652→    setActiveImageId((prev) =>
+   653→   653→      prev && files.some((f) => f.id === prev) ? prev : files[0].id
+   654→   654→    )
+   655→   655→  }, [files])
+   656→   656→
+   657→   657→  const activeFile = files.find((f) => f.id === activeImageId) ?? files[0] ?? null
+   658→   658→  const activeState: MemeState | null = activeFile
+   659→   659→    ? memes[activeFile.id] ?? makeMemeState()
+   660→   660→    : null
+   661→   661→  const activeElement =
+   662→   662→    activeState?.elements.find((e) => e.id === activeElementId) ?? null
+   663→   663→
+   664→   664→  /* Keep the active element valid (per image). */
+   665→   665→  React.useEffect(() => {
+   666→   666→    if (!activeFile) return
+   667→   667→    const st = memes[activeFile.id]
+   668→   668→    if (!st) return
+   669→   669→    if (activeElementId && st.elements.some((e) => e.id === activeElementId)) return
+   670→   670→    setActiveElementId(st.elements.length > 0 ? st.elements[st.elements.length - 1].id : null)
+   671→   671→  }, [activeFile, memes, activeElementId])
+   672→   672→
+   673→   673→  /* ---------------- Emit result whenever memes change -------------------- */
+   674→   674→  React.useEffect(() => {
+   675→   675→    if (files.length === 0) {
+   676→   676→      onChange(null)
+   677→   677→      return
+   678→   678→    }
+   679→   679→    const result: Record<string, MemeState> = {}
+   680→   680→    for (const f of files) {
+   681→   681→      result[f.file.name] = memes[f.id] ?? makeMemeState()
+   682→   682→    }
+   683→   683→    onChange({ memes: result })
+   684→   684→  }, [files, memes, onChange])
+   685→   685→
+   686→   686→  /* ---------------- Mutators --------------------------------------------- */
+   687→   687→  const patchActive = (patch: Partial<MemeState>) => {
+   688→   688→    if (!activeFile) return
+   689→   689→    setMemes((prev) => {
+   690→   690→      const cur = prev[activeFile.id] ?? makeMemeState()
+   691→   691→      return { ...prev, [activeFile.id]: { ...cur, ...patch } }
+   692→   692→    })
+   693→   693→  }
+   694→   694→
+   695→   695→  const patchElement = (id: string, patch: Partial<MemeTextElement>) => {
+   696→   696→    if (!activeFile) return
+   697→   697→    setMemes((prev) => {
+   698→   698→      const cur = prev[activeFile.id] ?? makeMemeState()
+   699→   699→      return {
+   700→   700→        ...prev,
+   701→   701→        [activeFile.id]: {
+   702→   702→          ...cur,
+   703→   703→          elements: cur.elements.map((e) => (e.id === id ? { ...e, ...patch } : e)),
+   704→   704→        },
+   705→   705→      }
+   706→   706→    })
+   707→   707→  }
+   708→   708→
+   709→   709→  const moveElement = (id: string, x: number, y: number) =>
+   710→   710→    patchElement(id, { x, y })
+   711→   711→
+   712→   712→  const addElement = () => {
+   713→   713→    if (!activeFile || !activeState) return
+   714→   714→    const el = makeElement({ text: 'New text', y: 0.5 })
+   715→   715→    patchActive({ elements: [...activeState.elements, el] })
+   716→   716→    setActiveElementId(el.id)
+   717→   717→  }
+   718→   718→
+   719→   719→  const duplicateElement = () => {
+   720→   720→    if (!activeElement || !activeState) return
+   721→   721→    const el = makeElement({
+   722→   722→      ...activeElement,
+   723→   723→      id: uid('el'),
+   724→   724→      y: Math.min(0.95, activeElement.y + 0.08),
+   725→   725→    })
+   726→   726→    patchActive({ elements: [...activeState.elements, el] })
+   727→   727→    setActiveElementId(el.id)
+   728→   728→  }
+   729→   729→
+   730→   730→  const removeElement = (id: string) => {
+   731→   731→    if (!activeFile || !activeState) return
+   732→   732→    patchActive({ elements: activeState.elements.filter((e) => e.id !== id) })
+   733→   733→  }
+   734→   734→
+   735→   735→  /** Inside ↔ Outside: remap every element's y so text stays glued to the
+   736→   736→   *  image content (bars are added/removed around it). */
+   737→   737→  const toggleMode = (mode: 'inside' | 'outside') => {
+   738→   738→    if (!activeFile || !activeState || activeState.mode === mode) return
+   739→   739→    const imgH = (meta[activeFile.id]?.height ?? 1) || 1
+   740→   740→    const bar = Math.round(imgH * MEME_BAR_FRAC)
+   741→   741→    const total = imgH + bar * 2
+   742→   742→    const elements = activeState.elements.map((el) => {
+   743→   743→      let y = el.y
+   744→   744→      if (mode === 'outside') y = (bar + el.y * imgH) / total
+   745→   745→      else y = (el.y * total - bar) / imgH
+   746→   746→      return { ...el, y: Math.min(0.99, Math.max(0.01, y)) }
+   747→   747→    })
+   748→   748→    patchActive({ mode, elements })
+   749→   749→  }
+   750→   750→
+   751→   751→  const elementLabel = (el: MemeTextElement, i: number) =>
+   752→   752→    `Text ${i + 1} · ${el.text.trim().replace(/\s+/g, ' ').slice(0, 16) || 'empty'}`
+   753→   753→
+   754→   754→  const handleMetrics = React.useCallback((m: Record<string, number>) => {
+   755→   755→    setMetrics((prev) => {
+   756→   756→      const keys = new Set([...Object.keys(prev), ...Object.keys(m)])
+   757→   757→      for (const k of keys) if (prev[k] !== m[k]) return m
+   758→   758→      return prev
+   759→   759→    })
+   760→   760→  }, [])
+   761→   761→
+   762→   762→  const effectivePx = activeElement ? metrics[activeElement.id] ?? 0 : 0
+   763→   763→
+   764→   764→  return (
+   765→   765→    <div className="space-y-4">
+   766→   766→      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
+   767→   767→        {/* ------------------------- Canvas column ------------------------- */}
+   768→   768→        <div className="space-y-3">
+   769→   769→          {/* Floating text toolbar (iloveimg-style pill, ABOVE the canvas so
+   770→   770→              it never blocks dragging the top caption) */}
+   771→   771→          {activeElement && (
+   772→   772→            <div className="flex justify-center">
+   773→   773→              <div className="flex items-center gap-1 rounded-xl border border-border/70 bg-card/95 p-1 shadow-lg backdrop-blur">
+   774→   774→                <Select
+   775→   775→                  value={activeElement.font}
+   776→   776→                  onValueChange={(v) => patchElement(activeElement.id, { font: v })}
+   777→   777→                >
+   778→   778→                  <SelectTrigger
+   779→   779→                    className="h-8 w-[120px] text-xs"
+   780→   780→                    aria-label="Font family"
+   781→   781→                  >
+   782→   782→                    <SelectValue />
+   783→   783→                  </SelectTrigger>
+   784→   784→                  <SelectContent>
+   785→   785→                    {MEME_FONTS.map((f) => (
+   786→   786→                      <SelectItem key={f} value={f}>
+   787→   787→                        {f}
+   788→   788→                      </SelectItem>
+   789→   789→                    ))}
+   790→   790→                  </SelectContent>
+   791→   791→                </Select>
+   792→   792→                {(
+   793→   793→                  [
+   794→   794→                    ['bold', <Bold key="b" className="h-3.5 w-3.5" />, 'Bold'],
+   795→   795→                    ['italic', <Italic key="i" className="h-3.5 w-3.5" />, 'Italic'],
+   796→   796→                    ['underline', <Underline key="u" className="h-3.5 w-3.5" />, 'Underline'],
+   797→   797→                    ['caps', <CaseUpper key="c" className="h-3.5 w-3.5" />, 'ALL-CAPS'],
+   798→   798→                  ] as const
+   799→   799→                ).map(([key, icon, label]) => (
+   800→   800→                  <button
+   801→   801→                    key={key}
+   802→   802→                    type="button"
+   803→   803→                    onClick={() => patchElement(activeElement.id, { [key]: !activeElement[key] })}
+   804→   804→                    aria-label={`${label} toggle`}
+   805→   805→                    aria-pressed={activeElement[key]}
+   806→   806→                    className={cn(
+   807→   807→                      'grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+   808→   808→                      activeElement[key] && 'bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary'
+   809→   809→                    )}
+   810→   810→                  >
+   811→   811→                    {icon}
+   812→   812→                  </button>
+   813→   813→                ))}
+   814→   814→                <div className="mx-0.5 h-5 w-px bg-border" />
+   815→   815→                {(['left', 'center', 'right'] as const).map((a) => {
+   816→   816→                  const Icon = a === 'left' ? AlignLeft : a === 'center' ? AlignCenter : AlignRight
+   817→   817→                  return (
+   818→   818→                    <button
+   819→   819→                      key={a}
+   820→   820→                      type="button"
+   821→   821→                      onClick={() => patchElement(activeElement.id, { align: a })}
+   822→   822→                      aria-label={`Align ${a}`}
+   823→   823→                      aria-pressed={activeElement.align === a}
+   824→   824→                      className={cn(
+   825→   825→                        'grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+   826→   826→                        activeElement.align === a && 'bg-primary/10 text-primary hover:bg-primary/10 hover:text-primary'
+   827→   827→                      )}
+   828→   828→                    >
+   829→   829→                      <Icon className="h-3.5 w-3.5" />
+   830→   830→                    </button>
+   831→   831→                  )
+   832→   832→                })}
+   833→   833→                <div className="mx-0.5 h-5 w-px bg-border" />
+   834→   834→                <button
+   835→   835→                  type="button"
+   836→   836→                  onClick={duplicateElement}
+   837→   837→                  aria-label="Duplicate this text"
+   838→   838→                  className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+   839→   839→                >
+   840→   840→                  <Copy className="h-3.5 w-3.5" />
+   841→   841→                </button>
+   842→   842→                <button
+   843→   843→                  type="button"
+   844→   844→                  onClick={() => removeElement(activeElement.id)}
+   845→   845→                  aria-label="Delete this text"
+   846→   846→                  className="grid h-8 w-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+   847→   847→                >
+   848→   848→                  <Trash2 className="h-3.5 w-3.5" />
+   849→   849→                </button>
+   850→   850→              </div>
+   851→   851→            </div>
+   852→   852→          )}
+   853→   853→
+   854→   854→          <div className="relative">
+   855→   855→            {/* Live canvas */}
+   856→   856→            {activeFile && activeState ? (
+   857→   857→              <MemePreview
+   858→   858→                file={activeFile.file}
+   859→   859→                state={activeState}
+   860→   860→                activeElementId={activeElementId}
+   861→   861→                onSelect={setActiveElementId}
+   862→   862→                onMove={moveElement}
+   863→   863→                onMetrics={handleMetrics}
+   864→   864→              />
+   865→   865→            ) : (
+   866→   866→              <div
+   867→   867→                className="grid h-64 place-items-center rounded-2xl border border-border/60 text-sm text-muted-foreground"
+   868→   868→                style={CHECKER_BG}
+   869→   869→              >
+   870→   870→                No image selected
+   871→   871→              </div>
+   872→   872→            )}
+   873→   873→
+   874→   874→            {/* Floating add-text button */}
+   875→   875→            <div className="absolute right-4 top-1/2 z-20 -translate-y-1/2">
+   876→   876→              <button
+   877→   877→                type="button"
+   878→   878→                onClick={addElement}
+   879→   879→                aria-label="Add a text box"
+   880→   880→                className="relative grid h-12 w-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
+   881→   881→              >
+   882→   882→                <Plus className="h-5 w-5" />
+   883→   883→                {(activeState?.elements.length ?? 0) > 0 && (
+   884→   884→                  <span className="absolute -left-1.5 -top-1.5 grid h-5 min-w-5 place-items-center rounded-full bg-foreground px-1 text-[10px] font-bold text-background">
+   885→   885→                    {activeState?.elements.length}
+   886→   886→                  </span>
+   887→   887→                )}
+   888→   888→              </button>
+   889→   889→            </div>
+   890→   890→          </div>
+   891→   891→
+   892→   892→          {/* Queued images film strip */}
+   893→   893→          <div className="flex gap-2 overflow-x-auto pb-1">
+   894→   894→            {files.map((f) => {
+   895→   895→              const active = f.id === activeFile?.id
+   896→   896→              const url = meta[f.id]?.url
+   897→   897→              return (
+   898→   898→                <div key={f.id} className="group relative shrink-0">
+   899→   899→                  <button
+   900→   900→                    type="button"
+   901→   901→                    onClick={() => setActiveImageId(f.id)}
+   902→   902→                    aria-label={`Edit meme for ${f.file.name}`}
+   903→   903→                    aria-pressed={active}
+   904→   904→                    className={cn(
+   905→   905→                      'block h-14 w-20 overflow-hidden rounded-lg border-2 bg-muted transition-all',
+   906→   906→                      active
+   907→   907→                        ? 'border-primary'
+   908→   908→                        : 'border-transparent opacity-80 hover:opacity-100'
+   909→   909→                    )}
+   910→   910→                  >
+   911→   911→                    {url ? (
+   912→   912→                      <img
+   913→   913→                        src={url}
+   914→   914→                        alt=""
+   915→   915→                        className="h-full w-full object-cover"
+   916→   916→                        draggable={false}
+   917→   917→                      />
+   918→   918→                    ) : (
+   919→   919→                      <Loader2 className="mx-auto mt-5 h-4 w-4 animate-spin text-muted-foreground" />
+   920→   920→                    )}
+   921→   921→                  </button>
+   922→   922→                  <button
+   923→   923→                    type="button"
+   924→   924→                    onClick={() => onRemove(f.id)}
+   925→   925→                    aria-label={`Remove ${f.file.name}`}
+   926→   926→                    className="absolute -right-1.5 -top-1.5 hidden h-5 w-5 place-items-center rounded-full bg-destructive text-white shadow group-hover:grid"
+   927→   927→                  >
+   928→   928→                    <X className="h-3 w-3" />
+   929→   929→                  </button>
+   930→   930→                </div>
+   931→   931→              )
+   932→   932→            })}
+   933→   933→            <button
+   934→   934→              type="button"
+   935→   935→              onClick={onAddMore}
+   936→   936→              aria-label="Add more images"
+   937→   937→              className="grid h-14 w-20 shrink-0 place-items-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+   938→   938→            >
+   939→   939→              <ImagePlus className="h-4 w-4" />
+   940→   940→            </button>
+   941→   941→          </div>
+   942→   942→        </div>
+   943→   943→
+   944→   944→        {/* ------------------------- Sidebar column ------------------------ */}
+   945→   945→        <div className="space-y-3">
+   946→   946→          <div className="rounded-2xl border border-border/70 bg-secondary/40 p-4">
+   947→   947→            <p className="text-sm font-semibold">Meme editor</p>
+   948→   948→
+   949→   949→            {/* Inside / Outside toggle */}
+   950→   950→            <div className="mt-3 grid grid-cols-2 gap-2">
+   951→   951→              {(
+   952→   952→                [
+   953→   953→                  ['inside', 'Text inside'],
+   954→   954→                  ['outside', 'Text outside'],
+   955→   955→                ] as const
+   956→   956→              ).map(([m, label]) => (
+   957→   957→                <button
+   958→   958→                  key={m}
+   959→   959→                  type="button"
+   960→   960→                  onClick={() => toggleMode(m)}
+   961→   961→                  aria-pressed={activeState?.mode === m}
+   962→   962→                  className={cn(
+   963→   963→                    'rounded-xl border px-3 py-2.5 text-xs font-medium transition-colors',
+   964→   964→                    activeState?.mode === m
+   965→   965→                      ? 'border-primary bg-primary/5 text-foreground'
+   966→   966→                      : 'border-border bg-card text-muted-foreground hover:border-primary/40'
+   967→   967→                  )}
+   968→   968→                >
+   969→   969→                  {label}
+   970→   970→                </button>
+   971→   971→              ))}
+   972→   972→            </div>
+   973→   973→            <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+   974→   974→              &ldquo;Outside&rdquo; adds classic white bars above and below the
+   975→   975→              image; your text stays glued to the picture.
+   976→   976→            </p>
+   977→   977→
+   978→   978→            <div className="mt-3 grid gap-2">
+   979→   979→              <button
+   980→   980→                type="button"
+   981→   981→                onClick={onAddMore}
+   982→   982→                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+   983→   983→              >
+   984→   984→                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+   985→   985→                  <ImagePlus className="h-4 w-4" />
+   986→   986→                </span>
+   987→   987→                Add image
+   988→   988→              </button>
+   989→   989→              <button
+   990→   990→                type="button"
+   991→   991→                onClick={addElement}
+   992→   992→                className="flex items-center gap-3 rounded-xl border border-border bg-card px-3 py-2.5 text-sm font-medium transition-colors hover:border-primary/50 hover:bg-primary/5"
+   993→   993→              >
+   994→   994→                <span className="grid h-8 w-8 place-items-center rounded-lg bg-primary text-primary-foreground">
+   995→   995→                  <Type className="h-4 w-4" />
+   996→   996→                </span>
+   997→   997→                Add text
+   998→   998→              </button>
+   999→   999→            </div>
+  1000→  1000→
+  1001→  1001→            {activeState && activeState.elements.length > 0 && (
+  1002→  1002→              <div className="mt-3 space-y-1.5">
+  1003→  1003→                {activeState.elements.map((el, i) => {
+  1004→  1004→                  const active = el.id === activeElementId
+  1005→  1005→                  return (
+  1006→  1006→                    <div
+  1007→  1007→                      key={el.id}
+  1008→  1008→                      role="button"
+  1009→  1009→                      tabIndex={0}
+  1010→  1010→                      onClick={() => setActiveElementId(el.id)}
+  1011→  1011→                      onKeyDown={(e) => {
+  1012→  1012→                        if (e.key === 'Enter' || e.key === ' ') {
+  1013→  1013→                          e.preventDefault()
+  1014→  1014→                          setActiveElementId(el.id)
+  1015→  1015→                        }
+  1016→  1016→                      }}
+  1017→  1017→                      className={cn(
+  1018→  1018→                        'flex cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors',
+  1019→  1019→                        active
+  1020→  1020→                          ? 'border-primary bg-primary/5 text-foreground'
+  1021→  1021→                          : 'border-border/60 bg-card text-muted-foreground hover:border-primary/40'
+  1022→  1022→                      )}
+  1023→  1023→                    >
+  1024→  1024→                      <Type className="h-3.5 w-3.5 shrink-0" />
+  1025→  1025→                      <span className="min-w-0 flex-1 truncate">{elementLabel(el, i)}</span>
+  1026→  1026→                      <button
+  1027→  1027→                        type="button"
+  1028→  1028→                        onClick={(e) => {
+  1029→  1029→                          e.stopPropagation()
+  1030→  1030→                          removeElement(el.id)
+  1031→  1031→                        }}
+  1032→  1032→                        aria-label={`Delete ${elementLabel(el, i)}`}
+  1033→  1033→                        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+  1034→  1034→                      >
+  1035→  1035→                        <Trash2 className="h-3 w-3" />
+  1036→  1036→                      </button>
+  1037→  1037→                    </div>
+  1038→  1038→                  )
+  1039→  1039→                })}
+  1040→  1040→              </div>
+  1041→  1041→            )}
+  1042→  1042→          </div>
+  1043→  1043→
+  1044→  1044→          {activeElement ? (
+  1045→  1045→            <>
+  1046→  1046→              <ElementCard
+  1047→  1047→                el={activeElement}
+  1048→  1048→                effectivePx={effectivePx}
+  1049→  1049→                onChange={(patch) => patchElement(activeElement.id, patch)}
+  1050→  1050→                onRemove={() => removeElement(activeElement.id)}
+  1051→  1051→              />
+  1052→  1052→              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+  1053→  1053→                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+  1054→  1054→                Editing live — drag text on the canvas or type here; every
+  1055→  1055→                change updates the preview instantly.
+  1056→  1056→              </p>
+  1057→  1057→            </>
+  1058→  1058→          ) : (
+  1059→  1059→            <div className="rounded-2xl border border-dashed border-border bg-card/60 p-5 text-center">
+  1060→  1060→              <p className="text-sm font-medium">Nothing selected</p>
+  1061→  1061→              <p className="mt-1 text-xs text-muted-foreground">
+  1062→  1062→                Click a text box on the canvas (or add one) to style it — the
+  1063→  1063→                meme updates live as you type and drag.
+  1064→  1064→              </p>
+  1065→  1065→            </div>
+  1066→  1066→          )}
+  1067→  1067→        </div>
+  1068→  1068→      </div>
+  1069→  1069→
+  1070→  1070→      {/* Hint */}
+  1071→  1071→      <div className="flex items-start gap-3 rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 text-sm">
+  1072→  1072→        <Laugh className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
+  1073→  1073→        <p className="text-muted-foreground">
+  1074→  1074→          Pick an image from the film strip, then click any text on the canvas
+  1075→  1075→          to drag it around. Use the floating toolbar for quick bold/italic/
+  1076→  1076→          caps and duplicate; the sidebar has fonts, sizes and colors. What
+  1077→  1077→          you see is exactly what gets baked into the download — original size
+  1078→  1078→          and format, 100% locally.
+  1079→  1079→        </p>
+  1080→  1080→      </div>
+  1081→  1081→    </div>
+  1082→  1082→  )
+  1083→  1083→}
+  1084→  1084→
