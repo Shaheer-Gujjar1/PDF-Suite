@@ -1,19 +1,14 @@
 'use client'
 
 import { Lock, Cpu, Zap, Heart } from 'lucide-react'
-import { categories } from '@/lib/tools'
 
-interface SiteFooterProps {
-  onNavigate: (to: string) => void
-}
-
-export function SiteFooter({ onNavigate }: SiteFooterProps) {
+export function SiteFooter() {
   const year = new Date().getFullYear()
   return (
     <footer className="mt-auto border-t border-border/60 bg-secondary/40">
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-        <div className="grid gap-10 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
-          <div className="space-y-4">
+        <div>
+          <div className="max-w-sm space-y-4">
             <div className="flex items-center gap-2">
               <span className="grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br from-rose-500 to-pink-600 text-white shadow-lg shadow-rose-500/30">
                 <span className="text-sm font-bold">T</span>
@@ -39,22 +34,6 @@ export function SiteFooter({ onNavigate }: SiteFooterProps) {
               </span>
             </div>
           </div>
-
-          {categories.slice(0, 3).map((c) => (
-            <div key={c.id} className="space-y-3">
-              <h4 className="text-sm font-semibold">{c.name}</h4>
-              <ul className="space-y-2 text-sm text-muted-foreground">
-                <li>
-                  <button
-                    onClick={() => onNavigate('/')}
-                    className="transition-colors hover:text-foreground"
-                  >
-                    {c.tagline}
-                  </button>
-                </li>
-              </ul>
-            </div>
-          ))}
         </div>
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-border/60 pt-6 text-sm text-muted-foreground sm:flex-row">

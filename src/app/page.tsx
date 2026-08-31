@@ -45,7 +45,7 @@ export default function Home() {
         </AnimatePresence>
       </main>
 
-      <SiteFooter onNavigate={navigate} />
+      <SiteFooter />
     </div>
   )
 }
