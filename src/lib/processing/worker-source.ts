@@ -2280,11 +2280,13 @@ processors['meme-maker'] = async function (inputs, opts, onProgress, log) {
 };
 
 /* ---- Blur Face (region censoring) ---------------------------------------- */
-/* opts.shapes: { [fileName]: [{ type: 'rect'|'ellipse', x, y, w, h }] } with */
-/* coords normalized 0..1 against the image dimensions. opts.strength 1..100  */
-/* maps to a box radius proportional to min(W,H) so the censoring looks the   */
-/* same on any image size. Three separable box-blur passes ~= gaussian with   */
-/* sigma ~= radius. Alpha is preserved so transparent PNGs keep their shape.  */
+/* opts.shapes: { [fileName]: [{ type: 'rect'|'ellipse', x, y, w, h, rot }] } */
+/* with coords normalized 0..1 against the image dimensions and rot the free  */
+/* rotation in degrees (clockwise, around the shape centre; 0 = axis-aligned).*/
+/* opts.strength 1..100 maps to a box radius proportional to min(W,H) so the  */
+/* censoring looks the same on any image size. Three separable box-blur       */
+/* passes ~= gaussian with sigma ~= radius. Alpha is preserved so transparent */
+/* PNGs keep their shape.                                                     */
 
 function boxBlurH(src, dst, w, h, r) {
   var win = r + r + 1;
@@ -2358,11 +2360,14 @@ processors['blur-faces'] = async function (inputs, opts, onProgress, log) {
       var raw = rawShapes[s];
       var fx = Number(raw.x), fy = Number(raw.y), fw = Number(raw.w), fh = Number(raw.h);
       if (!isFinite(fx) || !isFinite(fy) || !isFinite(fw) || !isFinite(fh)) continue;
+      var rot = Number(raw.rotation);
+      if (!isFinite(rot)) rot = 0;
+      rot = ((rot % 360) + 360) % 360;
       fw = Math.min(Math.max(fw, 0.004), 1);
       fh = Math.min(Math.max(fh, 0.004), 1);
       fx = Math.min(Math.max(fx, 0), 1 - fw);
       fy = Math.min(Math.max(fy, 0), 1 - fh);
-      shapes.push({ type: raw.type === 'rect' ? 'rect' : 'ellipse', x: fx, y: fy, w: fw, h: fh });
+      shapes.push({ type: raw.type === 'rect' ? 'rect' : 'ellipse', x: fx, y: fy, w: fw, h: fh, rotation: rot });
     }
     log('Blurring ' + input.fileName + (shapes.length ? ' (' + shapes.length + ' area' + (shapes.length === 1 ? '' : 's') + ')' : ' (no areas)'));
     var blob = new Blob([input.data], { type: guessMime(input.fileName) });
@@ -2402,19 +2407,45 @@ processors['blur-faces'] = async function (inputs, opts, onProgress, log) {
       if (sx + sw > w) sw = w - sx;
       if (sy + shh > h) shh = h - sy;
       if (sx < 0 || sy < 0 || sw < 2 || shh < 2) continue;
-      var region = ctx.getImageData(sx, sy, sw, shh);
-      boxBlurRGBA(region.data, sw, shh, radius);
-      var tmpC = new OffscreenCanvas(sw, shh);
+      /* Free rotation around the shape centre (degrees, clockwise). */
+      var rotRad = (sp.rotation || 0) * Math.PI / 180;
+      var absCos = Math.abs(Math.cos(rotRad));
+      var absSin = Math.abs(Math.sin(rotRad));
+      var hullW = sw * absCos + shh * absSin; /* axis-aligned bbox of the rotated shape */
+      var hullH = sw * absSin + shh * absCos;
+      var scx = sx + sw / 2;
+      var scy = sy + shh / 2;
+      /* Expand the blurred region by the blur radius so box-blur edge
+         sampling near the rotated hull never clamps (corners of a rotated
+         shape touch the hull, so a plain bbox would smear them). */
+      var margin = radius + 2;
+      var rx0 = Math.max(0, Math.floor(scx - hullW / 2 - margin));
+      var ry0 = Math.max(0, Math.floor(scy - hullH / 2 - margin));
+      var rx1 = Math.min(w, Math.ceil(scx + hullW / 2 + margin));
+      var ry1 = Math.min(h, Math.ceil(scy + hullH / 2 + margin));
+      var rw = rx1 - rx0;
+      var rh = ry1 - ry0;
+      if (rw < 2 || rh < 2) continue;
+      var region = ctx.getImageData(rx0, ry0, rw, rh);
+      boxBlurRGBA(region.data, rw, rh, radius);
+      var tmpC = new OffscreenCanvas(rw, rh);
       tmpC.getContext('2d').putImageData(region, 0, 0);
       ctx.save();
       ctx.beginPath();
       if (sp.type === 'rect') {
-        ctx.rect(sx, sy, sw, shh);
+        ctx.translate(scx, scy);
+        ctx.rotate(rotRad);
+        ctx.rect(-sw / 2, -shh / 2, sw, shh);
+        ctx.clip();
+        /* Clip survives; reset the transform so the blurred content stays
+           aligned with the original image (only the REGION is rotated). */
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(tmpC, rx0, ry0);
       } else {
-        ctx.ellipse(sx + sw / 2, sy + shh / 2, sw / 2, shh / 2, 0, 0, Math.PI * 2);
+        ctx.ellipse(scx, scy, sw / 2, shh / 2, rotRad, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(tmpC, rx0, ry0);
       }
-      ctx.clip();
-      ctx.drawImage(tmpC, sx, sy);
       ctx.restore();
     }
     var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });

@@ -7,6 +7,7 @@ import {
   ImagePlus,
   Loader2,
   MousePointer2,
+  RotateCw,
   ScanFace,
   Square,
   Trash2,
@@ -29,12 +30,14 @@ export type BlurShapeType = 'rect' | 'ellipse'
 export interface BlurShape {
   id: string
   type: BlurShapeType
-  /** 0..1, top-left corner, relative to image dimensions. */
+  /** 0..1, top-left corner of the UNROTATED box, relative to image dims. */
   x: number
   y: number
   /** 0..1 of image dimensions. */
   w: number
   h: number
+  /** Free rotation in degrees (clockwise) around the box centre. */
+  rotation: number
 }
 
 export interface BlurFacesResult {
@@ -83,6 +86,7 @@ function makeShape(type: BlurShapeType, geom?: Partial<BlurShape>): BlurShape {
     y: 0.42 - h / 2,
     w,
     h,
+    rotation: 0,
     ...geom,
   }
 }
@@ -95,13 +99,10 @@ function blurRadiusPx(strength: number, natW: number, natH: number): number {
   return Math.min(400, Math.max(2, Math.round(base)))
 }
 
-/** clip-path that reveals exactly the shape region of a full-size overlay. */
-function clipPathFor(s: Pick<BlurShape, 'type' | 'x' | 'y' | 'w' | 'h'>): string {
-  const p = (n: number) => `${(n * 100).toFixed(3)}%`
-  if (s.type === 'rect') {
-    return `inset(${p(s.y)} ${p(1 - s.x - s.w)} ${p(1 - s.y - s.h)} ${p(s.x)})`
-  }
-  return `ellipse(${p(s.w / 2)} ${p(s.h / 2)} at ${p(s.x + s.w / 2)} ${p(s.y + s.h / 2)})`
+/** Normalize any angle to -180..180 degrees. */
+function normDeg(d: number): number {
+  const m = ((d % 360) + 360) % 360
+  return m > 180 ? m - 360 : m
 }
 
 const HANDLES = [
@@ -115,11 +116,16 @@ const HANDLES = [
   ['w', 0, 0.5],
 ] as const
 
-function cursorFor(handle: string): string {
-  if (handle === 'n' || handle === 's') return 'ns-resize'
-  if (handle === 'e' || handle === 'w') return 'ew-resize'
-  if (handle === 'ne' || handle === 'sw') return 'nesw-resize'
-  return 'nwse-resize'
+function cursorFor(handle: string, rot = 0): string {
+  const base =
+    ({ e: 0, se: 45, s: 90, sw: 135, w: 180, nw: 225, n: 270, ne: 315 } as Record<string, number>)[
+      handle
+    ] ?? 0
+  const a = (((base + rot) % 180) + 180) % 180
+  if (a <= 22.5 || a > 157.5) return 'ew-resize'
+  if (a <= 67.5) return 'nwse-resize'
+  if (a <= 112.5) return 'ns-resize'
+  return 'nesw-resize'
 }
 
 /* ------------------------------------------------------------------------ */
@@ -155,11 +161,13 @@ function BlurStage({
   const dragRef = React.useRef<
     | null
     | {
-        kind: 'move' | 'resize' | 'draw'
+        kind: 'move' | 'resize' | 'rotate' | 'draw'
         id?: string
         handle?: string
         startX: number
         startY: number
+        /** Pointer position in display px — used by resize/rotate. */
+        startPx?: { x: number; y: number }
         orig?: BlurShape
       }
   >(null)
@@ -212,6 +220,17 @@ function BlurStage({
     }
   }
 
+  /** Pointer position + overlay size in display px (rotation math space). */
+  const toPxPt = (e: React.PointerEvent) => {
+    const rect = overlayRef.current!.getBoundingClientRect()
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+      rw: rect.width,
+      rh: rect.height,
+    }
+  }
+
   const capture = (e: React.PointerEvent) => {
     try {
       overlayRef.current?.setPointerCapture(e.pointerId)
@@ -229,7 +248,7 @@ function BlurStage({
     }
     const ghostType: BlurShapeType = drawMode === 'rect' ? 'rect' : 'ellipse'
     dragRef.current = { kind: 'draw', startX: px, startY: py }
-    setGhost({ id: '__ghost', type: ghostType, x: px, y: py, w: 0, h: 0 })
+    setGhost({ id: '__ghost', type: ghostType, x: px, y: py, w: 0, h: 0, rotation: 0 })
     capture(e)
   }
 
@@ -246,8 +265,34 @@ function BlurStage({
     if (e.button !== 0) return
     e.stopPropagation()
     const { px, py } = toPct(e)
+    const p = toPxPt(e)
     onSelect(s.id)
-    dragRef.current = { kind: 'resize', id: s.id, handle, orig: s, startX: px, startY: py }
+    dragRef.current = {
+      kind: 'resize',
+      id: s.id,
+      handle,
+      orig: s,
+      startX: px,
+      startY: py,
+      startPx: { x: p.x, y: p.y },
+    }
+    capture(e)
+  }
+
+  const startRotate = (e: React.PointerEvent, s: BlurShape) => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    const { px, py } = toPct(e)
+    const p = toPxPt(e)
+    onSelect(s.id)
+    dragRef.current = {
+      kind: 'rotate',
+      id: s.id,
+      orig: s,
+      startX: px,
+      startY: py,
+      startPx: { x: p.x, y: p.y },
+    }
     capture(e)
   }
 
@@ -260,22 +305,77 @@ function BlurStage({
       const nx = Math.min(1 - d.orig.w, Math.max(0, d.orig.x + (px - d.startX)))
       const ny = Math.min(1 - d.orig.h, Math.max(0, d.orig.y + (py - d.startY)))
       onPatch(d.id, { x: nx, y: ny })
-    } else if (d.kind === 'resize' && d.orig && d.id) {
+    } else if (d.kind === 'resize' && d.orig && d.id && d.startPx) {
       const o = d.orig
       const h = d.handle || 'se'
-      let x1 = o.x
-      let y1 = o.y
-      let x2 = o.x + o.w
-      let y2 = o.y + o.h
-      if (h.includes('w')) x1 = Math.min(px, x2 - MIN)
-      if (h.includes('e')) x2 = Math.max(px, x1 + MIN)
-      if (h.includes('n')) y1 = Math.min(py, y2 - MIN)
-      if (h.includes('s')) y2 = Math.max(py, y1 + MIN)
-      x1 = Math.max(0, x1)
-      y1 = Math.max(0, y1)
-      x2 = Math.min(1, x2)
-      y2 = Math.min(1, y2)
-      onPatch(d.id, { x: x1, y: y1, w: x2 - x1, h: y2 - y1 })
+      const rect = overlayRef.current!.getBoundingClientRect()
+      const cxr = e.clientX - rect.left
+      const cyr = e.clientY - rect.top
+      const th = ((o.rotation || 0) * Math.PI) / 180
+      const cos = Math.cos(th)
+      const sin = Math.sin(th)
+      /* Pointer delta (image space) -> shape-local frame -> fractions. */
+      const ddx = cxr - d.startPx.x
+      const ddy = cyr - d.startPx.y
+      const ldxP = ddx * cos + ddy * sin /* R(-θ) */
+      const ldyP = -ddx * sin + ddy * cos
+      const ldx = ldxP / rect.width
+      const ldy = ldyP / rect.height
+      /* Start pointer in shape-local fractions (edges are absolute in the
+         local frame, so the pointer must be too — not just its delta).
+         R(-θ) of (pointer - centre) is CENTRE-relative: add the half
+         extents to land in box-local coordinates (origin = top-left). */
+      const spx = d.startPx.x - (o.x + o.w / 2) * rect.width
+      const spy = d.startPx.y - (o.y + o.h / 2) * rect.height
+      const l0x = (spx * cos + spy * sin) / rect.width
+      const l0y = (-spx * sin + spy * cos) / rect.height
+      const pxL = o.w / 2 + l0x + ldx
+      const pyL = o.h / 2 + l0y + ldy
+      const MIN = 0.02
+      let x1 = 0
+      let y1 = 0
+      let x2 = o.w
+      let y2 = o.h
+      if (h.includes('w')) x1 = Math.min(pxL, x2 - MIN)
+      if (h.includes('e')) x2 = Math.max(pxL, x1 + MIN)
+      if (h.includes('n')) y1 = Math.min(pyL, y2 - MIN)
+      if (h.includes('s')) y2 = Math.max(pyL, y1 + MIN)
+      const nw = Math.min(x2 - x1, 1)
+      const nh = Math.min(y2 - y1, 1)
+      /* Centre shift: local fractions -> px -> rotate back to image space. */
+      const cdxL = (x1 + x2) / 2 - o.w / 2
+      const cdyL = (y1 + y2) / 2 - o.h / 2
+      const cdxP = cdxL * rect.width
+      const cdyP = cdyL * rect.height
+      const cdxI = cdxP * cos - cdyP * sin /* R(θ) */
+      const cdyI = cdxP * sin + cdyP * cos
+      let cx = o.x + o.w / 2 + cdxI / rect.width
+      let cy = o.y + o.h / 2 + cdyI / rect.height
+      /* Keep the whole rotated bbox inside the image. */
+      const wpx = nw * rect.width
+      const hpx = nh * rect.height
+      const bw = wpx * Math.abs(cos) + hpx * Math.abs(sin)
+      const bh = wpx * Math.abs(sin) + hpx * Math.abs(cos)
+      if (bw >= rect.width) cx = 0.5
+      else cx = Math.min(1 - bw / (2 * rect.width), Math.max(bw / (2 * rect.width), cx))
+      if (bh >= rect.height) cy = 0.5
+      else cy = Math.min(1 - bh / (2 * rect.height), Math.max(bh / (2 * rect.height), cy))
+      onPatch(d.id, { x: cx - nw / 2, y: cy - nh / 2, w: nw, h: nh })
+    } else if (d.kind === 'rotate' && d.orig && d.id && d.startPx) {
+      const o = d.orig
+      const rect = overlayRef.current!.getBoundingClientRect()
+      const cx = (o.x + o.w / 2) * rect.width
+      const cy = (o.y + o.h / 2) * rect.height
+      const pxNow = e.clientX - rect.left
+      const pyNow = e.clientY - rect.top
+      const a0 = Math.atan2(d.startPx.y - cy, d.startPx.x - cx)
+      const a1 = Math.atan2(pyNow - cy, pxNow - cx)
+      let rot = (o.rotation || 0) + ((a1 - a0) * 180) / Math.PI
+      rot = ((((rot % 360) + 360) % 360) + 180) % 360 - 180
+      for (const t of [-180, -90, 0, 90, 180]) {
+        if (Math.abs(rot - t) < 2) rot = t
+      }
+      onPatch(d.id, { rotation: rot })
     } else if (d.kind === 'draw') {
       setGhost({
         id: '__ghost',
@@ -284,6 +384,7 @@ function BlurStage({
         y: Math.min(d.startY, py),
         w: Math.abs(px - d.startX),
         h: Math.abs(py - d.startY),
+        rotation: 0,
       })
     }
   }
@@ -307,7 +408,7 @@ function BlurStage({
           className="relative mx-auto w-fit outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
           tabIndex={0}
           role="application"
-          aria-label="Blur area editor — drag to draw, drag shapes to move"
+          aria-label="Blur area editor — drag to draw, drag shapes to move, grip to rotate"
           onKeyDown={(e) => {
             if ((e.key === 'Delete' || e.key === 'Backspace') && activeShapeId) {
               e.preventDefault()
@@ -332,24 +433,60 @@ function BlurStage({
             onPointerUp={onOverlayPointerUp}
             onPointerCancel={onOverlayPointerUp}
           >
-            {/* Blurred pixels — one clipped clone per shape (CSS stands in for
-                the worker's box blur; radius math matches). */}
+            {/* Blurred pixels — a rotated, overflow-clipped clone per shape.
+                The wrapper spins by +θ (the REGION rotates) while the inner
+                full-size image counter-spins by -θ around the same centre,
+                so the blurred CONTENT stays aligned with the base image —
+                exactly what the worker paints (clip rotated, pixels not). */}
             {cssBlur > 0 &&
-              shapes.map((s) => (
-                <img
-                  key={`blur-${s.id}`}
-                  src={src}
-                  alt=""
-                  aria-hidden
-                  draggable={false}
-                  className="pointer-events-none absolute inset-0 h-full w-full select-none"
-                  style={{ filter: `blur(${cssBlur}px)`, clipPath: clipPathFor(s) }}
-                />
-              ))}
+              shapes.map((s) => {
+                const rot = s.rotation || 0
+                return (
+                  <div
+                    key={`blur-${s.id}`}
+                    aria-hidden
+                    className="pointer-events-none absolute"
+                    style={{
+                      left: `${s.x * 100}%`,
+                      top: `${s.y * 100}%`,
+                      width: `${s.w * 100}%`,
+                      height: `${s.h * 100}%`,
+                      transform: `rotate(${rot}deg)`,
+                      transformOrigin: '50% 50%',
+                      overflow: 'hidden',
+                      borderRadius: s.type === 'ellipse' ? '50%' : 6,
+                    }}
+                  >
+                    <img
+                      src={src}
+                      alt=""
+                      draggable={false}
+                      className="absolute select-none"
+                      style={{
+                        width: `${100 / s.w}%`,
+                        height: `${100 / s.h}%`,
+                        left: `${(s.x / s.w) * -100}%`,
+                        top: `${(s.y / s.h) * -100}%`,
+                        maxWidth: 'none',
+                        maxHeight: 'none',
+                        filter: `blur(${cssBlur}px)`,
+                        transform: `rotate(${-rot}deg)`,
+                        transformOrigin: `${((s.x + s.w / 2) * 100).toFixed(4)}% ${(
+                          (s.y + s.h / 2) *
+                          100
+                        ).toFixed(4)}%`,
+                      }}
+                    />
+                  </div>
+                )
+              })}
 
-            {/* Interaction outlines */}
+            {/* Interaction layer — invisible borders by design: the blurred
+                region itself shows where the shape is. Only the selected
+                shape reveals handles + a rotate grip. */}
             {shapes.map((s, i) => {
               const active = s.id === activeShapeId
+              const rot = s.rotation || 0
               return (
                 <div
                   key={s.id}
@@ -357,23 +494,23 @@ function BlurStage({
                   tabIndex={-1}
                   aria-label={`${s.type === 'ellipse' ? 'Face blur' : 'Box blur'} ${i + 1}`}
                   onPointerDown={(e) => startMove(e, s)}
-                  className={cn(
-                    'absolute cursor-move',
-                    active
-                      ? 'border-2 border-primary'
-                      : 'border border-white/90 shadow-[0_0_0_1px_rgba(0,0,0,0.45)] hover:border-primary/80'
-                  )}
+                  className="absolute cursor-move"
                   style={{
                     left: `${s.x * 100}%`,
                     top: `${s.y * 100}%`,
                     width: `${s.w * 100}%`,
                     height: `${s.h * 100}%`,
+                    transform: `rotate(${rot}deg)`,
+                    transformOrigin: '50% 50%',
                     borderRadius: s.type === 'ellipse' ? '50%' : 6,
                   }}
                 >
                   {active && (
                     <>
-                      <span className="absolute -top-6 left-0 rounded-md bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground shadow">
+                      <span
+                        className="absolute -top-6 left-0 rounded-md bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground shadow"
+                        style={{ transform: `rotate(${-rot}deg)`, transformOrigin: '0 50%' }}
+                      >
                         {s.type === 'ellipse' ? 'Face' : 'Box'} {i + 1}
                       </span>
                       {HANDLES.map(([h, fx, fy]) => (
@@ -385,10 +522,28 @@ function BlurStage({
                           style={{
                             left: `${fx * 100}%`,
                             top: `${fy * 100}%`,
-                            cursor: cursorFor(h),
+                            cursor: cursorFor(h, rot),
                           }}
                         />
                       ))}
+                      {/* Free-rotate grip on a stem above the top edge. */}
+                      <span
+                        className="absolute left-1/2 top-[-34px] w-px -translate-x-1/2 bg-primary/50"
+                        style={{ height: 34 }}
+                        aria-hidden
+                      />
+                      <span
+                        onPointerDown={(e) => startRotate(e, s)}
+                        aria-label="Rotate handle — drag to rotate freely"
+                        className="absolute left-1/2 grid h-6 w-6 place-items-center rounded-full border-2 border-primary bg-white text-primary shadow"
+                        style={{
+                          top: -34,
+                          transform: 'translate(-50%, -50%)',
+                          cursor: 'grab',
+                        }}
+                      >
+                        <RotateCw className="h-3 w-3" />
+                      </span>
                     </>
                   )}
                 </div>
@@ -948,9 +1103,31 @@ export function BlurFacesView({
                     {Math.round(activeShape.x * activeMeta.width)},{' '}
                     {Math.round(activeShape.y * activeMeta.height)}
                     <br />
-                    Drag the area to move it, or pull any of its 8 handles to resize.
+                    Drag the area to move it, pull any of its 8 handles to
+                    resize, or grab the round grip above it to rotate freely.
                   </p>
                 )}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-xs font-medium">Rotation</Label>
+                    <span className="text-xs font-semibold text-primary">
+                      {normDeg(activeShape.rotation || 0)}°
+                    </span>
+                  </div>
+                  <Slider
+                    value={[normDeg(activeShape.rotation || 0)]}
+                    min={-180}
+                    max={180}
+                    step={1}
+                    onValueChange={(v) => patchShape(activeShape.id, { rotation: v[0] })}
+                    className="w-full"
+                    aria-label="Rotate this blur area"
+                  />
+                  <p className="text-[11px] leading-snug text-muted-foreground">
+                    Tilt the area to match any face angle — the blur region
+                    rotates with it in the final image.
+                  </p>
+                </div>
               </div>
             </div>
           ) : (
@@ -976,10 +1153,11 @@ export function BlurFacesView({
         <p className="text-muted-foreground">
           Pick an image from the film strip, choose Face or Box above the
           canvas, and drag anywhere to drop a blur area — stack as many as you
-          need, then nudge them with the Select tool. Use &ldquo;Apply to all
-          images&rdquo; for batches shot from the same spot. Output keeps the
-          original size and format; everything is censored locally, files
-          never leave your device.
+          need, then nudge them with the Select tool. Every area can be moved,
+          resized and freely rotated (round grip above it, or the Rotation
+          slider). Use &ldquo;Apply to all images&rdquo; for batches shot from
+          the same spot. Output keeps the original size and format; everything
+          is censored locally, files never leave your device.
         </p>
       </div>
     </div>
