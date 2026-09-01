@@ -2753,22 +2753,17 @@ processors['watermark-images'] = async function (inputs, opts, onProgress, log) 
   return out;
 };
 
-/* ---- Compress Images (re-encode + optional downscale) -------------------- */
-/* opts.formats: { [fileName]: 'keep'|'png'|'jpg'|'jpeg'|'webp' }.            */
-/* opts.quality (0..1) applies to lossy targets (JPG/WEBP); PNG ignores it.   */
-/* opts.maxDim (px, 0 = keep original) downscales so the longest edge is at   */
-/* most maxDim — never upscales. 'keep' preserves jpg/webp sources and saves  */
-/* everything else (gif, bmp, avif, ico...) as png — formats browsers can     */
-/* reliably encode. Original size comes from input.data.byteLength so the     */
-/* note can report the real saved percentage.                                 */
+/* ---- Compress Images (fully automatic) ----------------------------------- */
+/* No user options. Each image is re-encoded in its ORIGINAL format           */
+/* (jpg/jpeg -> jpg, webp -> webp, everything else -> png — the formats       */
+/* browsers reliably encode). Dimensions are preserved. A re-encode is only   */
+/* used when it is meaningfully smaller than the input; otherwise the         */
+/* original bytes are kept with an "already optimized" note — the output is   */
+/* never larger than the source. Lossy targets try quality 0.72 then 0.5.     */
 processors['compress-images'] = async function (inputs, opts, onProgress, log) {
-  var formats = (opts && opts.formats) || {};
-  var quality = opts && typeof opts.quality === 'number' ? opts.quality : 0.7;
-  var maxDim = opts && Number(opts.maxDim) > 0 ? Math.round(Number(opts.maxDim)) : 0;
   var TARGET_MIME = {
     png: 'image/png',
     jpg: 'image/jpeg',
-    jpeg: 'image/jpeg',
     webp: 'image/webp',
   };
   var out = [];
@@ -2783,50 +2778,69 @@ processors['compress-images'] = async function (inputs, opts, onProgress, log) {
         'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
       );
     }
-    var target = formats[input.fileName] || 'keep';
     var lower = (input.fileName || '').toLowerCase();
-    if (target === 'keep') {
-      if (/\.jpe?g$/.test(lower)) target = 'jpg';
-      else if (/\.webp$/.test(lower)) target = 'webp';
-      else target = 'png';
-    }
+    var target = /\.jpe?g$/.test(lower) ? 'jpg' : (/\.webp$/.test(lower) ? 'webp' : 'png');
     if (!TARGET_MIME[target]) target = 'png';
-    var scale = 1;
-    if (maxDim > 0 && Math.max(bmp.width, bmp.height) > maxDim) {
-      scale = maxDim / Math.max(bmp.width, bmp.height);
-    }
-    var w = Math.max(1, Math.round(bmp.width * scale));
-    var h = Math.max(1, Math.round(bmp.height * scale));
-    log(
-      'Compressing ' + input.fileName + ' -> ' + target.toUpperCase() +
-      (scale < 1 ? ' (' + w + 'x' + h + ')' : '') +
-      ' @ ' + Math.round(quality * 100) + '%'
-    );
+    var mime = TARGET_MIME[target];
+    var w = bmp.width;
+    var h = bmp.height;
+    log('Compressing ' + input.fileName + ' -> ' + target.toUpperCase() + ' (' + w + 'x' + h + ', auto)');
     var canvas = new OffscreenCanvas(w, h);
     var ctx = canvas.getContext('2d');
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    if (target === 'jpg' || target === 'jpeg') {
+    if (target === 'jpg') {
       /* JPEG has no alpha channel — flatten transparency onto white. */
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, w, h);
     }
     ctx.drawImage(bmp, 0, 0, w, h);
     if (bmp.close) bmp.close();
-    var outBlob = await canvas.convertToBlob({ type: TARGET_MIME[target], quality: quality });
-    if (outBlob.type && outBlob.type !== TARGET_MIME[target]) {
-      throw new Error('This browser cannot encode ' + target.toUpperCase() + ' images.');
-    }
-    var buf = await outBlob.arrayBuffer();
     var origSize = input.data.byteLength;
-    var pct = origSize > 0 ? Math.round((1 - buf.byteLength / origSize) * 100) : 0;
+    /* Only accept a re-encode that saves at least ~2% — otherwise the
+       original bytes win (output is never larger than the input). */
+    var buf = null;
+    if (target === 'png') {
+      /* PNG is lossless — the re-encode only wins on unoptimized files. */
+      var pngBlob = await canvas.convertToBlob({ type: mime });
+      if (pngBlob.type && pngBlob.type !== mime) {
+        throw new Error('This browser cannot encode PNG images.');
+      }
+      var pngBuf = await pngBlob.arrayBuffer();
+      if (pngBuf.byteLength < origSize * 0.98) buf = pngBuf;
+    } else {
+      var qualities = [0.72, 0.5];
+      for (var qi = 0; qi < qualities.length && !buf; qi++) {
+        var lossyBlob = await canvas.convertToBlob({ type: mime, quality: qualities[qi] });
+        if (lossyBlob.type && lossyBlob.type !== mime) {
+          throw new Error('This browser cannot encode ' + target.toUpperCase() + ' images.');
+        }
+        var lossyBuf = await lossyBlob.arrayBuffer();
+        if (lossyBuf.byteLength < origSize * 0.98) buf = lossyBuf;
+      }
+    }
+    var note;
+    var outName;
+    var outMime;
+    if (buf) {
+      var pct = origSize > 0 ? Math.round((1 - buf.byteLength / origSize) * 100) : 0;
+      note = w + 'x' + h + ' px · ' + pct + '% smaller';
+      outName = stripExt(input.fileName) + '-compressed.' + target;
+      outMime = mime;
+      log('Saved ' + input.fileName + ' — ' + pct + '% smaller');
+    } else {
+      /* Keep the original bytes, name and mime — never a bigger file. */
+      var extMatch = lower.match(/\.([a-z0-9]+)$/);
+      note = w + 'x' + h + ' px · already optimized';
+      outName = stripExt(input.fileName) + '-compressed.' + (extMatch ? extMatch[1] : 'img');
+      outMime = guessMime(input.fileName);
+      log('Kept ' + input.fileName + ' as-is — already optimized');
+    }
     out.push({
-      name: stripExt(input.fileName) + '-compressed.' + target,
-      data: buf,
-      mime: TARGET_MIME[target],
-      note:
-        w + 'x' + h + ' px · ' +
-        (pct >= 0 ? pct + '% smaller' : -pct + '% larger'),
+      name: outName,
+      data: buf || input.data.slice(0),
+      mime: outMime,
+      note: note,
     });
     onProgress((i + 1) / inputs.length);
   }

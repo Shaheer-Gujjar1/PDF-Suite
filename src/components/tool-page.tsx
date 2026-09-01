@@ -566,20 +566,14 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         quality: convRes?.quality ?? 0.92,
       }
     } else if (isCompressImages) {
-      // Compress Image: every file is processed, per-file, each with its own
-      // target format ('keep' preserves the source) chosen in the interactive
-      // view, plus the shared quality + max-size settings.
-      const compRes = interactiveResult as CompressImagesResult | null
+      // Compress Image is fully automatic — no user options. The worker
+      // re-encodes each file in its original format and never returns a
+      // larger file (originals win when already optimized).
       for (const qf of files) {
         const inp = await readInput(qf)
         if (inp) inputs.push(inp)
       }
-      runOptions = {
-        ...options,
-        formats: compRes?.formats ?? {},
-        quality: compRes?.quality ?? 0.7,
-        maxDim: compRes?.maxDim ?? 0,
-      }
+      runOptions = {}
     } else if (isResizeImages) {
       // Resize Image: every file is processed, per-file, with the shared
       // pixels/percentage settings chosen in the interactive view.

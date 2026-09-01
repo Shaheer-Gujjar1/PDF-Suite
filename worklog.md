@@ -864,3 +864,18 @@ Work Log:
 
 Stage Summary:
 - Locked-tool badge is now a minimal lock-only pill across all 9 locked tools; tooltip preserves the do-not-modify semantics on hover only.
+
+---
+Task ID: 18
+Agent: Super Z (main agent)
+Task: Compress Image -> fully automatic (user: "in compress image i want no options there just auto"; the WxH-number-inputs reference belonged to Resize Image, which already has them).
+
+Work Log:
+- compress-images-view.tsx rewritten: ALL settings removed (global format/quality/max-size card, per-file format Selects). Now: "Fully automatic" banner + read-only thumbnail rows (name, size, dims, Auto chip), remove/add-more kept. CompressImagesResult = { auto: true } readiness signal emitted when files exist (keeps the interactiveRun gate happy); no other state.
+- worker-source.ts processors['compress-images'] rewritten as auto: target = source format (jpg/jpeg->jpg, webp->webp, exotic->png), dims preserved (no scaling); JPEG flattened on white; only accepts a re-encode saving >=2% (lossy tries Q0.72 then Q0.5; PNG lossless re-encode), otherwise returns the ORIGINAL bytes + '-<origext>' name + guessMime mime with note "WxH px · already optimized" — output is never larger than the input. Win case note "WxH px · N% smaller".
+- tool-page.tsx compress branch: runOptions = {} (worker needs nothing). tools.ts description updated to "no settings, same dimensions, never larger".
+- Stale refs swept: compRes/fitInside/CompressTarget gone; remaining maxDim = Compress PDF helper (untouched), TARGETS = Convert view (intentional). bun run lint clean.
+- E2E: view shows banner + rows only; Run enabled via {auto:true}; test-photo.jpg 68609B -> 33881B JPEG ffd8ff exactly 1200x800 (51% smaller, Q0.72); test-checker.png 4030B -> EXACT original 4030B PNG 640x480 (already-optimized fallback verified byte-identical). "Processed 2 files" toast; per-file + ZIP downloads render. Screenshots: upload/compress-auto-view.png, upload/compress-auto-results.png. Gotcha: result download URLs are created lazily on button click — verify by JS-clicking Download buttons while a URL.createObjectURL hook stores blobs in window.__blobs (Blob has NO .name — don't filter on it), or read ~/Downloads after the first click only.
+
+Stage Summary:
+- Compress Image is now zero-option "just auto" like TinyPNG: drop files -> Run -> smaller files in the original format at the same dimensions, with a hard never-larger guarantee (originals win when already optimized). Resize Image keeps the WxH number inputs (that reference belonged to it).

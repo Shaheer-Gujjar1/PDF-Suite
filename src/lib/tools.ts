@@ -214,7 +214,7 @@ export const tools: Tool[] = [
     id: "compress-images",
     name: "Compress Image",
     description:
-      "Shrink JPG, PNG and WEBP images to a fraction of their size — pick the format and quality per file, optionally downscale huge photos. Batch ready; download each or all as ZIP.",
+      "Shrink JPG, PNG and WEBP images automatically — no settings, same dimensions, and results are never larger than the originals. Batch ready; download each or all as ZIP.",
     category: "image",
     icon: Shrink,
     accent: "orange",
