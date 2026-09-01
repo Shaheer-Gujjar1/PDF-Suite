@@ -754,30 +754,157 @@ processors['page-numbers'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
-/* ---- Watermark PDF ----------------------------------------------------- */
+/* ---- Watermark PDF (layer studio, mirrors Watermark Image) --------------- */
+/* opts.layers: [{ type:'text'|'image', text, fontFamily, fontSizePt (0=auto  */
+/* min(pw,ph)/8), color '#rrggbb', scale (logo % of page width), opacity,     */
+/* rotation (deg, CLOCKWISE like the canvas preview), tile, position          */
+/* ('top-left'...'bottom-right'), marginX, marginY, logoData?, logoName? }].  */
+/* Fonts map to pdf-lib StandardFonts (Arial/Verdana/Trebuchet -> Helvetica,  */
+/* Georgia/Times -> TimesRoman, Courier New -> Courier). pdf-lib rotates CCW  */
+/* and anchors at left-baseline / bottom-left, so stamps are placed by        */
+/* rotating the center-offset vector by -rotation to stay WYSIWYG with the    */
+/* preview. Logos: PNG/JPEG embedded directly, anything else decoded via      */
+/* createImageBitmap and re-encoded as PNG first. Every page gets all layers. */
 processors['watermark'] = async function (inputs, opts, onProgress, log) {
   var lib = getPDFLib();
-  var text = (opts && opts.text) || 'CONFIDENTIAL';
-  var fontSize = (opts && Number(opts.fontSize)) || 50;
-  var opacity = Math.max(0, Math.min(1, (opts && Number(opts.opacity)) || 0.15));
-  var rotation = (opts && Number(opts.rotation)) || -45;
-  var color = lib.rgb(0.6, 0.1, 0.15);
+  var layers = (opts && opts.layers) || [];
+  var FONT_MAP = {
+    'Arial, sans-serif': lib.StandardFonts.Helvetica,
+    'Verdana, sans-serif': lib.StandardFonts.Helvetica,
+    '"Trebuchet MS", sans-serif': lib.StandardFonts.Helvetica,
+    'Georgia, serif': lib.StandardFonts.TimesRoman,
+    '"Times New Roman", serif': lib.StandardFonts.TimesRoman,
+    '"Courier New", monospace': lib.StandardFonts.Courier,
+  };
+  function hexToRgb(hex) {
+    var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return lib.rgb(0, 0, 0);
+    var n = parseInt(m[1], 16);
+    return lib.rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+  }
+  /* Decode any logo to PNG bytes unless it is already PNG/JPEG. */
+  async function prepareLogo(data, name) {
+    var head = new Uint8Array(data.slice(0, 4));
+    var isPng = head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47;
+    var isJpg = head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff;
+    if (isPng || isJpg) return { data: data, type: isPng ? 'png' : 'jpg' };
+    var blob = new Blob([data], { type: guessMime(name || '') });
+    var bmp = await createImageBitmap(blob);
+    var c = new OffscreenCanvas(bmp.width, bmp.height);
+    var cx = c.getContext('2d');
+    cx.drawImage(bmp, 0, 0);
+    if (bmp.close) bmp.close();
+    var pngBlob = await c.convertToBlob({ type: 'image/png' });
+    return { data: await pngBlob.arrayBuffer(), type: 'png' };
+  }
   var out = [];
   for (var i = 0; i < inputs.length; i++) {
     log('Watermarking ' + inputs[i].fileName);
     var doc = await lib.PDFDocument.load(inputs[i].data, { ignoreEncryption: true });
-    var font = await doc.embedFont(lib.StandardFonts.HelveticaBold);
     var pages = doc.getPages();
+    /* Per-document resource caches. */
+    var fontCache = {};
+    var logoCache = {};
+    for (var li = 0; li < layers.length; li++) {
+      var L = layers[li];
+      if (L.type === 'text') {
+        var fam = FONT_MAP[L.fontFamily] || lib.StandardFonts.Helvetica;
+        if (!fontCache[fam]) fontCache[fam] = await doc.embedFont(fam);
+      } else if (L.logoData && !logoCache[li]) {
+        var prepared = await prepareLogo(L.logoData, L.logoName);
+        logoCache[li] = prepared.type === 'png'
+          ? await doc.embedPng(prepared.data)
+          : await doc.embedJpg(prepared.data);
+      }
+    }
     for (var p = 0; p < pages.length; p++) {
-      var pw = pages[p].getWidth(), ph = pages[p].getHeight();
-      var w = font.widthOfTextAtSize(text, fontSize);
-      pages[p].drawText(text, {
-        x: (pw - w) / 2, y: ph / 2 - fontSize / 2,
-        font: font, size: fontSize, color: color, opacity: opacity, rotate: lib.degrees(rotation)
-      });
+      var page = pages[p];
+      var pw = page.getWidth(), ph = page.getHeight();
+      for (var k = 0; k < layers.length; k++) {
+        var layer = layers[k];
+        var twPt, thPt, font = null, img = null;
+        if (layer.type === 'text') {
+          var text = layer.text || '';
+          if (!text) continue;
+          var famKey = FONT_MAP[layer.fontFamily] || lib.StandardFonts.Helvetica;
+          font = fontCache[famKey];
+          var size = Number(layer.fontSizePt) > 0
+            ? Math.round(Number(layer.fontSizePt))
+            : Math.max(12, Math.round(Math.min(pw, ph) / 8));
+          twPt = font.widthOfTextAtSize(text, size);
+          thPt = size;
+        } else {
+          img = logoCache[k];
+          if (!img) continue;
+          var lscale = Math.max(1, Math.min(100, Number(layer.scale) || 25)) / 100;
+          twPt = Math.max(1, pw * lscale);
+          thPt = Math.max(1, img.height * (twPt / img.width));
+        }
+        var rad = ((Number(layer.rotation) || 0) * Math.PI) / 180;
+        var cosA = Math.abs(Math.cos(rad)), sinA = Math.abs(Math.sin(rad));
+        var bboxW = twPt * cosA + thPt * sinA;
+        var bboxH = twPt * sinA + thPt * cosA;
+        var mX = Math.max(0, Number(layer.marginX) || 0);
+        var mY = Math.max(0, Number(layer.marginY) || 0);
+        var opacity = Math.max(0, Math.min(1, layer.opacity == null ? 0.5 : Number(layer.opacity)));
+        var theta = Number(layer.rotation) || 0;
+        var cosT = Math.cos(rad), sinT = Math.sin(rad);
+        var stamp = function (cxTop, cyTop) {
+          /* Convert top-down preview coords to PDF's bottom-up, then place
+             the stamp's visual center at (cxTop, ph - cyTop): anchor =
+             center - R(-theta) applied to the center offset vector. */
+          var cy = ph - cyTop;
+          var vx = twPt / 2;
+          var vy = layer.type === 'text' ? thPt * 0.36 : thPt / 2;
+          var ox = vx * cosT + vy * sinT;
+          var oy = -vx * sinT + vy * cosT;
+          var ax = cxTop - ox;
+          var ay = cy - oy;
+          if (layer.type === 'text') {
+            page.drawText(text, {
+              x: ax, y: ay, font: font, size: size,
+              color: hexToRgb(layer.color), opacity: opacity,
+              rotate: lib.degrees(-theta),
+            });
+          } else {
+            page.drawImage(img, {
+              x: ax, y: ay, width: twPt, height: thPt,
+              opacity: opacity, rotate: lib.degrees(-theta),
+            });
+          }
+        };
+        if (layer.tile) {
+          var stepX = bboxW + mX * 2;
+          var stepY = bboxH + mY * 2;
+          for (var yy = -stepY; yy < ph + stepY; yy += stepY) {
+            for (var xx = -stepX; xx < pw + stepX; xx += stepX) {
+              stamp(xx + stepX / 2, yy + stepY / 2);
+            }
+          }
+        } else {
+          var pos = layer.position || 'bottom-right';
+          var cxTop = pos.indexOf('left') !== -1
+            ? mX + bboxW / 2
+            : pos.indexOf('right') !== -1
+              ? pw - mX - bboxW / 2
+              : pw / 2;
+          var cyTop = pos.indexOf('top') !== -1
+            ? mY + bboxH / 2
+            : pos.indexOf('bottom') !== -1
+              ? ph - mY - bboxH / 2
+              : ph / 2;
+          stamp(cxTop, cyTop);
+        }
+      }
     }
     var bytes = await doc.save({ useObjectStreams: true });
-    out.push({ name: stripExt(inputs[i].fileName) + '-watermarked.pdf', data: toArrayBuffer(bytes), mime: 'application/pdf', note: 'Watermark added' });
+    out.push({
+      name: stripExt(inputs[i].fileName) + '-watermarked.pdf',
+      data: toArrayBuffer(bytes),
+      mime: 'application/pdf',
+      note: pages.length + (pages.length === 1 ? ' page · ' : ' pages · ') +
+        layers.length + (layers.length === 1 ? ' watermark' : ' watermarks'),
+    });
     onProgress((i + 1) / inputs.length);
   }
   onProgress(1);

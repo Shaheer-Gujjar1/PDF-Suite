@@ -400,7 +400,8 @@ export const tools: Tool[] = [
   {
     id: "watermark",
     name: "Watermark PDF",
-    description: "Stamp text or image watermarks across your pages.",
+    description:
+      "Stamp text or your logo on every page — font, size, color, opacity, rotation, tiling and 9-position placement with a live page preview. Stack multiple layers.",
     category: "edit",
     icon: Stamp,
     accent: "fuchsia",

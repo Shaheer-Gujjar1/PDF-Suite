@@ -47,6 +47,10 @@ import {
   WatermarkImagesView,
   type WatermarkImagesResult,
 } from '@/components/tools/watermark-images-view'
+import {
+  WatermarkPdfView,
+  type WatermarkPdfResult,
+} from '@/components/tools/watermark-pdf-view'
 import { RotateImagesView, type RotateImagesResult } from '@/components/tools/rotate-images-view'
 import { MemeMakerView, type MemeMakerResult } from '@/components/tools/meme-maker-view'
 import { BlurFacesView, type BlurFacesResult } from '@/components/tools/blur-faces-view'
@@ -108,7 +112,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'resize-images', 'favicon-generator', 'watermark-images', 'rotate-images', 'meme-maker', 'blur-faces']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'resize-images', 'favicon-generator', 'watermark-images', 'watermark', 'rotate-images', 'meme-maker', 'blur-faces']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -120,7 +124,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | ResizeImagesResult | FaviconResult | WatermarkImagesResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | ResizeImagesResult | FaviconResult | WatermarkImagesResult | WatermarkPdfResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -144,6 +148,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isResizeImages = tool.id === 'resize-images'
   const isFaviconGenerator = tool.id === 'favicon-generator'
   const isWatermarkImages = tool.id === 'watermark-images'
+  const isWatermark = tool.id === 'watermark'
   const isRotateImages = tool.id === 'rotate-images'
   const isMemeMaker = tool.id === 'meme-maker'
   const isBlurFaces = tool.id === 'blur-faces'
@@ -506,6 +511,29 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         wmLayers.push(base)
       }
       runOptions = { ...options, layers: wmLayers }
+    } else if (isWatermark) {
+      // Watermark PDF: layers carry the stamping config (image layers are
+      // stripped to plain data and carry the logo bytes for the worker).
+      const wmPdfRes = interactiveResult as WatermarkPdfResult | null
+      for (const qf of files) {
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
+      }
+      const wmPdfLayers: Record<string, unknown>[] = []
+      for (const layer of wmPdfRes?.layers ?? []) {
+        const base = { ...layer, logo: null, logoUrl: '' }
+        if (layer.type === 'image' && layer.logo) {
+          try {
+            base.logoData = await layer.logo.arrayBuffer()
+            base.logoName = layer.logo.name
+          } catch (e) {
+            console.error('[handleProcess] could not read watermark logo:', layer.logo.name, e)
+            toast.error(`Could not read logo "${layer.logo.name}" — please re-select it.`)
+          }
+        }
+        wmPdfLayers.push(base)
+      }
+      runOptions = { layers: wmPdfLayers }
     } else if (isRotateImages) {
       // Rotate Image: every file is processed, per-file, each with its own
       // quarter-turn angle + flips chosen in the interactive view.
@@ -834,6 +862,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           <PdfToExcelView
             files={files}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+          />
+        ) : isWatermark && files.length > 0 ? (
+          <WatermarkPdfView
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
           />
         ) : isCropImages && files.length > 0 ? (
           <CropImagesView

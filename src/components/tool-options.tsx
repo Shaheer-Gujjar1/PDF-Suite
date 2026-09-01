@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { Scissors, RotateCw, Images, FileArchive, LockOpen, Hash, Stamp, Lock, FileImage, Code2 } from 'lucide-react'
+import { Scissors, RotateCw, Images, FileArchive, LockOpen, Hash, Lock, FileImage, Code2 } from 'lucide-react'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
@@ -22,7 +22,7 @@ interface ToolOptionsProps {
 export function hasOptions(toolId: string): boolean {
   return [
     'split', 'rotate', 'images-to-pdf', 'compress', 'unlock',
-    'page-numbers', 'watermark', 'protect', 'pdf-to-images',
+    'page-numbers', 'protect', 'pdf-to-images',
   ].includes(toolId)
 }
 
@@ -40,8 +40,6 @@ export function defaultOptions(toolId: string): ToolOptionsMap {
       return { password: '' }
     case 'page-numbers':
       return { position: 'bottom-center', fontSize: 11, format: '{n}', startNumber: 1, margin: 28 }
-    case 'watermark':
-      return { text: 'CONFIDENTIAL', fontSize: 50, opacity: 15 }
     case 'protect':
       return { password: '' }
     case 'pdf-to-images':
@@ -87,9 +85,6 @@ export function ToolOptions({ tool, options, onChange, disabled }: ToolOptionsPr
       {tool.id === 'page-numbers' && (
         <PageNumberOptions options={options} set={set} />
       )}
-      {tool.id === 'watermark' && (
-        <WatermarkOptions options={options} set={set} />
-      )}
       {tool.id === 'protect' && (
         <ProtectOptions options={options} set={set} />
       )}
@@ -106,7 +101,6 @@ function SettingsIcon({ toolId }: { toolId: string }) {
   if (toolId === 'compress') return <FileArchive className="h-4 w-4" />
   if (toolId === 'unlock') return <LockOpen className="h-4 w-4" />
   if (toolId === 'page-numbers') return <Hash className="h-4 w-4" />
-  if (toolId === 'watermark') return <Stamp className="h-4 w-4" />
   if (toolId === 'protect') return <Lock className="h-4 w-4" />
   if (toolId === 'pdf-to-images') return <FileImage className="h-4 w-4" />
   return <Images className="h-4 w-4" />
@@ -458,49 +452,6 @@ function PageNumberOptions({
           max={80}
           step={1}
           onValueChange={(v) => set('margin', v[0])}
-          className="w-full sm:w-[220px]"
-        />
-      </OptionRow>
-    </div>
-  )
-}
-
-function WatermarkOptions({
-  options,
-  set,
-}: {
-  options: ToolOptionsMap
-  set: (key: string, value: unknown) => void
-}) {
-  const text = (options.text as string) || 'CONFIDENTIAL'
-  const fontSize = Number(options.fontSize ?? 50)
-  const opacity = Number(options.opacity ?? 15)
-  return (
-    <div className="space-y-4">
-      <OptionRow label="Watermark text" hint="Diagonal text stamped across every page.">
-        <Input
-          value={text}
-          onChange={(e) => set('text', e.target.value)}
-          placeholder="CONFIDENTIAL"
-        />
-      </OptionRow>
-      <OptionRow label={`Font size · ${fontSize}pt`} hint="Larger = more prominent.">
-        <Slider
-          value={[fontSize]}
-          min={20}
-          max={120}
-          step={5}
-          onValueChange={(v) => set('fontSize', v[0])}
-          className="w-full sm:w-[220px]"
-        />
-      </OptionRow>
-      <OptionRow label={`Opacity · ${opacity}%`} hint="Transparency of the watermark.">
-        <Slider
-          value={[opacity]}
-          min={5}
-          max={80}
-          step={5}
-          onValueChange={(v) => set('opacity', v[0])}
           className="w-full sm:w-[220px]"
         />
       </OptionRow>
