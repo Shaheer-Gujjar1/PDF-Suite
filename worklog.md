@@ -898,3 +898,16 @@ Work Log:
 
 Stage Summary:
 - Watermark PDF is now the Watermark Image studio, page-flavored: multi-layer text+logo stamps with live page-1 preview, fonts/colors/auto-size, rotation, tiling, 9-position grid, margins, layer stack reordering — WYSIWYG-verified down to the text matrix (48*cos30). Content streams are never re-encoded; every page gets every layer. Generic old 3-slider options UI retired.
+
+---
+Task ID: 20
+Agent: Super Z (main agent)
+Task: Mark Watermark PDF as "perfect" (locked) — user request, after the Task-19 layer-studio rebuild was accepted.
+
+Work Log:
+- tools.ts: added `locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked` to the `watermark` entry (id "watermark", Watermark PDF) — same one-line convention as all other locked tools. No other changes.
+- bun run lint clean.
+- E2E (agent-browser): home grid card inspection — Watermark PDF card has the icon-only emerald lock pill (span[title="Locked — stable & production-ready, do not modify unless explicitly asked"] with svg.lucide-lock, no text per the Task-17 lock-only style). Registry-wide sanity: 20 lock badges total = 9 image + 5 organize + Compress PDF + 4 convert-to-pdf + Watermark PDF; previously-unlocked tools (Repair PDF, PDF to Images, PDF to Excel, Page Numbers, Sign & Annotate, Edit PDF Text, Protect PDF, Unlock PDF) all still render WITHOUT the badge. Screenshot: upload/watermark-pdf-locked.png.
+
+Stage Summary:
+- Watermark PDF is production-locked: 20 of 28 tools now carry the locked flag (all 9 image tools, all 5 organize tools, Compress PDF, all 4 convert-to-pdf tools, and Watermark PDF). Badge verified in the browser; nothing else touched.

@@ -407,6 +407,7 @@ export const tools: Tool[] = [
     accent: "fuchsia",
     batch: true,
     step: 3,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "sign-annotate",
