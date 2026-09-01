@@ -26,6 +26,7 @@ import {
   Laugh,
   ScanFace,
   Shrink,
+  Scaling,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -216,6 +217,19 @@ export const tools: Tool[] = [
       "Shrink JPG, PNG and WEBP images to a fraction of their size — pick the format and quality per file, optionally downscale huge photos. Batch ready; download each or all as ZIP.",
     category: "image",
     icon: Shrink,
+    accent: "orange",
+    batch: true,
+    step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+
+  {
+    id: "resize-images",
+    name: "Resize Image",
+    description:
+      "Resize JPG, PNG and WEBP images by exact pixels or percentage — keep the aspect ratio, never upscale small photos by accident. Batch ready; download each or all as ZIP.",
+    category: "image",
+    icon: Scaling,
     accent: "orange",
     batch: true,
     step: 7,

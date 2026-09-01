@@ -2834,6 +2834,97 @@ processors['compress-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- Resize Images (pixels / percentage) --------------------------------- */
+/* opts: { mode: 'pixels'|'percentage', width, height, maintainAspect,        */
+/*         noEnlarge, scale }.                                                */
+/* pixels + maintainAspect: each image FITS inside width×height, aspect kept  */
+/*   exactly (scale = min(W/w, H/h)). pixels + !maintainAspect: exact W×H     */
+/*   stretch. percentage: scale each side by opts.scale (aspect kept).        */
+/* noEnlarge caps the effective scale at 1 (fit/percentage) or keeps the      */
+/* original size when the image is already within the box (exact stretch).    */
+/* Output preserves the source format (jpg -> jpeg, webp -> webp, else png;   */
+/* JPEG flattened onto white). Keep in sync with computeTargetSize() in the   */
+/* view.                                                                      */
+processors['resize-images'] = async function (inputs, opts, onProgress, log) {
+  var mode = opts && opts.mode === 'percentage' ? 'percentage' : 'pixels';
+  var boxW = opts && Number(opts.width) > 0 ? Math.round(Number(opts.width)) : 800;
+  var boxH = opts && Number(opts.height) > 0 ? Math.round(Number(opts.height)) : 600;
+  var maintainAspect = opts ? !!opts.maintainAspect : true;
+  var noEnlarge = opts ? !!opts.noEnlarge : true;
+  var scale = opts && typeof opts.scale === 'number' && opts.scale > 0 ? opts.scale : 0.5;
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var blob = new Blob([input.data], { type: guessMime(input.fileName) });
+    var bmp;
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch (err) {
+      throw new Error(
+        'Could not decode ' + input.fileName + ' — this browser cannot read that image format.'
+      );
+    }
+    var tw, th;
+    var ow = bmp.width;
+    var oh = bmp.height;
+    if (mode === 'percentage') {
+      var s = noEnlarge ? Math.min(1, scale) : scale;
+      tw = Math.max(1, Math.round(bmp.width * s));
+      th = Math.max(1, Math.round(bmp.height * s));
+    } else if (maintainAspect) {
+      var fs = Math.min(boxW / bmp.width, boxH / bmp.height);
+      var capped = noEnlarge ? Math.min(1, fs) : fs;
+      tw = Math.max(1, Math.round(bmp.width * capped));
+      th = Math.max(1, Math.round(bmp.height * capped));
+    } else {
+      var within = bmp.width <= boxW && bmp.height <= boxH;
+      if (noEnlarge && within) {
+        tw = bmp.width;
+        th = bmp.height;
+      } else {
+        tw = Math.max(1, boxW);
+        th = Math.max(1, boxH);
+      }
+    }
+    var unchanged = tw === ow && th === oh;
+    log(
+      'Resizing ' + input.fileName + ': ' + ow + 'x' + oh +
+      (unchanged ? ' (kept)' : ' -> ' + tw + 'x' + th)
+    );
+    var lower = (input.fileName || '').toLowerCase();
+    var isJpg = /\.jpe?g$/.test(lower);
+    var isWebp = /\.webp$/.test(lower);
+    var mime = isJpg ? 'image/jpeg' : isWebp ? 'image/webp' : 'image/png';
+    var ext = isJpg ? 'jpg' : isWebp ? 'webp' : 'png';
+    var canvas = new OffscreenCanvas(tw, th);
+    var ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    if (mime === 'image/jpeg') {
+      /* JPEG has no alpha — flatten transparency onto white. */
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, tw, th);
+    }
+    ctx.drawImage(bmp, 0, 0, tw, th);
+    if (bmp.close) bmp.close();
+    var outBlob = await canvas.convertToBlob({ type: mime, quality: 0.92 });
+    if (outBlob.type && outBlob.type !== mime) {
+      throw new Error('This browser cannot encode ' + mime + ' images.');
+    }
+    var buf = await outBlob.arrayBuffer();
+    out.push({
+      name: stripExt(input.fileName) + '-resized.' + ext,
+      data: buf,
+      mime: mime,
+      note: ow + 'x' + oh +
+        (unchanged ? ' px · no resize' : ' → ' + tw + 'x' + th + ' px'),
+    });
+    onProgress((i + 1) / inputs.length);
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

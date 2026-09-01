@@ -42,6 +42,7 @@ export type ProcessorType =
   | 'meme-maker'
   | 'blur-faces'
   | 'compress-images'
+  | 'resize-images'
 
 export interface ProcessInput {
   id: string

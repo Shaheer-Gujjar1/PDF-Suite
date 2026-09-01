@@ -41,6 +41,7 @@ import { EditTextView, type EditResult } from '@/components/tools/edit-text-view
 import { CropImagesView, type CropImagesResult } from '@/components/tools/crop-images-view'
 import { ConvertImagesView, type ConvertImagesResult } from '@/components/tools/convert-images-view'
 import { CompressImagesView, type CompressImagesResult } from '@/components/tools/compress-images-view'
+import { ResizeImagesView, type ResizeImagesResult } from '@/components/tools/resize-images-view'
 import { FaviconGeneratorView, type FaviconResult } from '@/components/tools/favicon-view'
 import {
   WatermarkImagesView,
@@ -82,6 +83,8 @@ function getInput(tool: Tool): InputConfig {
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'compress-images':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
+    case 'resize-images':
+      return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'favicon-generator':
       return { accept: 'image/*', multiple: true, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     case 'watermark-images':
@@ -105,7 +108,7 @@ function getInput(tool: Tool): InputConfig {
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'favicon-generator', 'watermark-images', 'rotate-images', 'meme-maker', 'blur-faces']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'resize-images', 'favicon-generator', 'watermark-images', 'rotate-images', 'meme-maker', 'blur-faces']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -117,7 +120,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | FaviconResult | WatermarkImagesResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | ResizeImagesResult | FaviconResult | WatermarkImagesResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -138,6 +141,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isCropImages = tool.id === 'crop-images'
   const isConvertImages = tool.id === 'convert-images'
   const isCompressImages = tool.id === 'compress-images'
+  const isResizeImages = tool.id === 'resize-images'
   const isFaviconGenerator = tool.id === 'favicon-generator'
   const isWatermarkImages = tool.id === 'watermark-images'
   const isRotateImages = tool.id === 'rotate-images'
@@ -576,6 +580,23 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         quality: compRes?.quality ?? 0.7,
         maxDim: compRes?.maxDim ?? 0,
       }
+    } else if (isResizeImages) {
+      // Resize Image: every file is processed, per-file, with the shared
+      // pixels/percentage settings chosen in the interactive view.
+      const rszRes = interactiveResult as ResizeImagesResult | null
+      for (const qf of files) {
+        const inp = await readInput(qf)
+        if (inp) inputs.push(inp)
+      }
+      runOptions = {
+        ...options,
+        mode: rszRes?.mode ?? 'pixels',
+        width: rszRes?.width ?? 800,
+        height: rszRes?.height ?? 600,
+        maintainAspect: rszRes?.maintainAspect ?? true,
+        noEnlarge: rszRes?.noEnlarge ?? true,
+        scale: rszRes?.scale ?? 0.5,
+      }
     } else {
       // For merge/word-to-pdf, use the drag-ordered files; otherwise use files as-is
       const orderedFiles = isMerge
@@ -836,6 +857,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
           />
         ) : isCompressImages && files.length > 0 ? (
           <CompressImagesView
+            files={stableImageFiles}
+            onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
+            onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isResizeImages && files.length > 0 ? (
+          <ResizeImagesView
             files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}

@@ -829,3 +829,25 @@ Work Log:
 
 Stage Summary:
 - Every image tool now wears the emerald "Perfect" pill (8/8), and the badge explicitly reads "Perfect". New Compress Image tool is live at #/compress-images: batch re-encode with per-file target format (keep/JPG/WEBP/PNG), shared quality slider, optional longest-edge downscale, honest per-file size-delta notes, per-file + ZIP downloads — fully E2E-verified (magic bytes, exact dimensions, real savings) and production-locked like its siblings.
+
+---
+Task ID: 16
+Agent: Super Z (main agent)
+Task: New image tool "Resize Image" (user request, iLoveIMG screenshot as reference: By pixels/By percentage, exact W×H, Maintain aspect ratio, Do not enlarge if smaller).
+
+Work Log:
+- types.ts: ProcessorType gains 'resize-images'; registry.ts maps 'resize-images' -> 'resize-images'.
+- tools.ts: entry "Resize Image" (category image, icon Scaling, accent orange, batch, step 7, locked: true — flagged Perfect like all image tools).
+- resize-images-view.tsx (new): segmented By pixels/By percentage toggle; pixels mode = Width/Height number inputs + "Maintain aspect ratio" checkbox (default ON; each image fits INSIDE the W×H box, never stretched) + "Do not enlarge if smaller" checkbox (default ON); percentage mode = slider 10-200% step 5 (default 50%) + same no-enlarge checkbox (caps at 100%). Per-file rows: thumbnail, size, live computed output dims via computeTargetSize() ("1200×800 px → 800×533 px", "· no resize" when kept), remove + add-more tiles, info hint. Emits ResizeImagesResult { mode, width, height, maintainAspect, noEnlarge, scale } via onChange. computeTargetSize() documented as the mirror of the worker math.
+- worker-source.ts processors['resize-images']: EXIF-aware decode; pixels+aspect -> scale=min(W/w,H/h) (noEnlarge caps at 1); pixels+exact -> stretch to W×H (noEnlarge keeps original when image already within box); percentage -> scale each side (noEnlarge caps at 100%); min 1px; high smoothing quality; keeps source format (jpg/jpeg->jpeg white-flattened, webp->webp, else png) at Q0.92; output name '-resized'; note "OxOp px · no resize" or "OxO → TxT px"; original dims captured before bmp.close().
+- tool-page.tsx wiring: import, getInput case (image/*, multiple), INTERACTIVE_TOOLS, isResizeImages, interactiveResult union, handleProcess branch (mode/width/height/maintainAspect/noEnlarge/scale with safe fallbacks), render branch after CompressImagesView.
+- E2E (agent-browser, test-photo.jpg 1200x800 67KB + test-checker.png 640x480 3.9KB):
+  * Home: "Resize Image:PERFECT" pill among all image tools.
+  * Live preview before running: "→ 800×533 px" / "· no resize" — matches closed-form math exactly.
+  * Run 1 defaults (pixels 800×600 fit + noEnlarge): JPEG magic ÿØÿ 800×533 29.7KB image/jpeg; PNG 640×480 kept 10848B.
+  * Run 2 (aspect OFF, exact 800×600): JPEG exactly 800×600 (stretch); checker 640×480 kept (within box).
+  * Run 3 (percentage 50%): JPEG 600×400 21190B; PNG 320×240 3842B — both exactly half.
+  * ZIP batch: PK signature 15415B. Lint clean; no page errors. Screenshot: upload/resize-view.png.
+
+Stage Summary:
+- Resize Image is live at #/resize-images with the iLoveIMG feature set (By pixels / By percentage, Maintain aspect ratio, Do not enlarge if smaller) in ToolForge's design language: fit-in-box batch semantics that never distort, honest per-row output-size previews before running, original format preserved, per-file + ZIP downloads. All three resize paths E2E-verified pixel-exact; tool ships production-locked (Perfect pill) with the other 8 image tools.
