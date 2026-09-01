@@ -45,6 +45,7 @@ export type ProcessorType =
   | 'resize-images'
   // Step 8 — HTML rendering
   | 'html-to-image'
+  | 'photo-editor'
 
 export interface ProcessInput {
   id: string

@@ -31,6 +31,7 @@ import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-t
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
 import { HtmlToImageView, type HtmlToImageConfig } from '@/components/tools/html-to-image-view'
+import { PhotoEditorView, type PhotoEditorResult } from '@/components/tools/photo-editor-view'
 import { PdfToExcelView } from '@/components/tools/pdf-to-excel-view'
 import { PageNumbersPreview } from '@/components/tools/page-numbers-preview'
 import { renderDocxToPages } from '@/lib/docx-renderer'
@@ -127,12 +128,14 @@ function getInput(tool: Tool): InputConfig {
       return { accept: '', multiple: false, hint: 'Paste your HTML', mode: 'text' }
     case 'html-to-image':
       return { accept: '', multiple: false, hint: 'Paste your HTML', mode: 'text' }
+    case 'photo-editor':
+      return { accept: 'image/*', multiple: false, hint: 'JPG, PNG, WEBP, GIF, BMP — any image format', mode: 'files' }
     default:
       return { accept: 'application/pdf', multiple: tool.batch, hint: 'PDF files', mode: 'files' }
   }
 }
 
-const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'resize-images', 'favicon-generator', 'watermark-images', 'watermark', 'rotate-images', 'meme-maker', 'blur-faces']
+const INTERACTIVE_TOOLS = ['organize', 'crop', 'sign-annotate', 'edit-text', 'crop-images', 'convert-images', 'compress-images', 'resize-images', 'favicon-generator', 'watermark-images', 'watermark', 'rotate-images', 'meme-maker', 'blur-faces', 'photo-editor']
 
 export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const a = accentClasses[tool.accent]
@@ -144,7 +147,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     defaultOptions(tool.id)
   )
   const [interactiveResult, setInteractiveResult] = React.useState<
-    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | ResizeImagesResult | FaviconResult | WatermarkImagesResult | WatermarkPdfResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | null
+    OrganizeResult | CropResult | SignResult | EditResult | CropImagesResult | ConvertImagesResult | CompressImagesResult | ResizeImagesResult | FaviconResult | WatermarkImagesResult | WatermarkPdfResult | RotateImagesResult | MemeMakerResult | BlurFacesResult | PhotoEditorResult | null
   >(null)
   const [mergeOrder, setMergeOrder] = React.useState<string[]>([])
   const [wordOrder, setWordOrder] = React.useState<string[]>([])
@@ -161,6 +164,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isExcelToPdf = tool.id === 'excel-to-pdf'
   const isHtmlToPdf = tool.id === 'html-to-pdf'
   const isHtmlToImage = tool.id === 'html-to-image'
+  const isPhotoEditor = tool.id === 'photo-editor'
   const isPdfToExcel = tool.id === 'pdf-to-excel'
   const isPageNumbers = tool.id === 'page-numbers'
   const isCropImages = tool.id === 'crop-images'
@@ -573,6 +577,17 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
       }
       mode = 'single'
       singleLabel = 'Excel → PDF output'
+    } else if (isPhotoEditor) {
+      // Photo Editor: the view composites the edited photo live and emits the
+      // finished PNG bytes — the worker only packages them for download.
+      const res = interactiveResult as PhotoEditorResult | null
+      if (!res || !res.data || res.data.byteLength === 0) {
+        toast.error('The editor has no output yet — try again.')
+        return
+      }
+      inputs = [{ fileName: res.fileName, data: res.data, size: res.data.byteLength }]
+      actualProcessor = 'photo-editor'
+      mode = 'per-file'
     } else if (isCropImages) {
       // Crop Images: only files with a drawn crop are processed, per-file.
       // Crops come from the interactive view in natural pixel coordinates.
@@ -1039,6 +1054,11 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             files={stableImageFiles}
             onRemove={(id) => setFiles((prev) => prev.filter((f) => f.id !== id))}
             onAddMore={handleAddMore}
+            onChange={setInteractiveResult}
+          />
+        ) : isPhotoEditor && files.length > 0 ? (
+          <PhotoEditorView
+            file={files[0].file}
             onChange={setInteractiveResult}
           />
         ) : isInteractive && files.length > 0 ? (

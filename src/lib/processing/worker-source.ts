@@ -3092,6 +3092,32 @@ processors['html-to-image'] = async function (inputs, _opts, onProgress, log) {
   return out;
 };
 
+/* ---- Photo Editor (pre-rendered on the main thread) ---------------------- */
+/* The interactive view composites the edited photo on a canvas and hands the
+   finished PNG bytes here. The worker just packages them as a downloadable
+   result (correct name/mime + dimensions). */
+processors['photo-editor'] = async function (inputs, _opts, onProgress, log) {
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Packaging ' + inputs[i].fileName);
+    var note = '';
+    try {
+      var bmp = await createImageBitmap(new Blob([inputs[i].data]));
+      note = bmp.width + 'x' + bmp.height + ' px';
+      if (bmp.close) bmp.close();
+    } catch (e) { /* dimensions are decorative — never fail the run */ }
+    onProgress((i + 1) / inputs.length);
+    out.push({
+      name: inputs[i].fileName,
+      data: inputs[i].data,
+      mime: guessMime(inputs[i].fileName),
+      note: note,
+    });
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;

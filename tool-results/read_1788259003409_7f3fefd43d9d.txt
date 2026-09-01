@@ -1,0 +1,997 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import * as React from 'react'
+     4→     4→import {
+     5→     5→  Check,
+     6→     6→  Copy,
+     7→     7→  Crop as CropIcon,
+     8→     8→  ImagePlus,
+     9→     9→  Loader2,
+    10→    10→  RotateCcw,
+    11→    11→  Square,
+    12→    12→  X,
+    13→    13→} from 'lucide-react'
+    14→    14→import { Button } from '@/components/ui/button'
+    15→    15→import { cn } from '@/lib/utils'
+    16→    16→
+    17→    17→export interface CropImagesResult {
+    18→    18→  /** Natural-pixel crop rects, keyed by file name. */
+    19→    19→  crops: Record<
+    20→    20→    string,
+    21→    21→    { x: number; y: number; width: number; height: number }
+    22→    22→  >
+    23→    23→}
+    24→    24→
+    25→    25→interface CropImagesViewProps {
+    26→    26→  files: { id: string; file: File }[]
+    27→    27→  onRemove: (id: string) => void
+    28→    28→  onAddMore: () => void
+    29→    29→  onChange: (result: CropImagesResult | null) => void
+    30→    30→}
+    31→    31→
+    32→    32→type Ratio = 'free' | 'original' | '1:1' | '4:3' | '16:9'
+    33→    33→
+    34→    34→/** Crop rect in relative (0..1) coordinates so it survives rescaling. */
+    35→    35→interface RelRect {
+    36→    36→  x: number
+    37→    37→  y: number
+    38→    38→  w: number
+    39→    39→  h: number
+    40→    40→}
+    41→    41→
+    42→    42→interface ImageMeta {
+    43→    43→  url: string
+    44→    44→  width: number
+    45→    45→  height: number
+    46→    46→}
+    47→    47→
+    48→    48→interface PxRect {
+    49→    49→  x: number
+    50→    50→  y: number
+    51→    51→  width: number
+    52→    52→  height: number
+    53→    53→}
+    54→    54→
+    55→    55→interface PxPoint {
+    56→    56→  x: number
+    57→    57→  y: number
+    58→    58→}
+    59→    59→
+    60→    60→type DragMode =
+    61→    61→  | 'moving'
+    62→    62→  | 'resize-n'
+    63→    63→  | 'resize-s'
+    64→    64→  | 'resize-e'
+    65→    65→  | 'resize-w'
+    66→    66→  | 'resize-ne'
+    67→    67→  | 'resize-nw'
+    68→    68→  | 'resize-se'
+    69→    69→  | 'resize-sw'
+    70→    70→
+    71→    71→const HANDLE_SIZE = 12
+    72→    72→const MIN_SIZE = 24
+    73→    73→/** Default selection covers this fraction of the smaller container axis. */
+    74→    74→const DEFAULT_COVER = 0.6
+    75→    75→
+    76→    76→const RATIO_PRESETS: { id: Ratio; label: string }[] = [
+    77→    77→  { id: 'free', label: 'Free' },
+    78→    78→  { id: 'original', label: 'Original' },
+    79→    79→  { id: '1:1', label: '1:1' },
+    80→    80→  { id: '4:3', label: '4:3' },
+    81→    81→  { id: '16:9', label: '16:9' },
+    82→    82→]
+    83→    83→
+    84→    84→function ratioValue(ratio: Ratio, natural: ImageMeta | null): number | null {
+    85→    85→  if (ratio === 'free') return null
+    86→    86→  if (ratio === 'original') {
+    87→    87→    return natural ? natural.width / natural.height : null
+    88→    88→  }
+    89→    89→  if (ratio === '1:1') return 1
+    90→    90→  if (ratio === '4:3') return 4 / 3
+    91→    91→  return 16 / 9
+    92→    92→}
+    93→    93→
+    94→    94→function clamp(v: number, lo: number, hi: number): number {
+    95→    95→  return Math.max(lo, Math.min(v, hi))
+    96→    96→}
+    97→    97→
+    98→    98→function relToPx(rel: RelRect, cw: number, ch: number): PxRect {
+    99→    99→  return { x: rel.x * cw, y: rel.y * ch, width: rel.w * cw, height: rel.h * ch }
+   100→   100→}
+   101→   101→
+   102→   102→/**
+   103→   103→ * Resize by moving ONLY the edges/corner the user grabbed.
+   104→   104→ *
+   105→   105→ * Mid-edge handles (n/s/e/w) are STRICTLY single-axis in every mode — the
+   106→   106→ * dragged edge follows the pointer, the opposite edge never moves and the
+   107→   107→ * perpendicular dimension is untouched: dragging e/w changes width only,
+   108→   108→ * dragging n/s changes height only (iloveimg/Cropper.js behavior). They
+   109→   109→ * never consult the ratio: re-centering or re-deriving the other axis made
+   110→   110→ * both dimensions change on a side drag and could even snap the width to
+   111→   111→ * the container edge when the derived size overflowed.
+   112→   112→ *
+   113→   113→ * A locked ratio is enforced on CORNER drags only: the dragged corner
+   114→   114→ * follows the pointer on the width axis, the height is derived from the
+   115→   115→ * ratio and everything is anchored at the opposite corner. Ratio presets
+   116→   116→ * still re-fit on click, and Full area / Copy to all / drawing keep their
+   117→   117→ * ratio-aware behavior.
+   118→   118→ */
+   119→   119→function resizeWithHandles(
+   120→   120→  dm: DragMode,
+   121→   121→  start: PxRect,
+   122→   122→  dx: number,
+   123→   123→  dy: number,
+   124→   124→  cw: number,
+   125→   125→  ch: number,
+   126→   126→  ratio: number | null
+   127→   127→): PxRect {
+   128→   128→  let left = start.x
+   129→   129→  let top = start.y
+   130→   130→  let right = start.x + start.width
+   131→   131→  let bottom = start.y + start.height
+   132→   132→
+   133→   133→  // Which edges did the user grab? Parse the direction from the mode SUFFIX
+   134→   134→  // ('n', 'se', …). NEVER dm.includes() on the full string: the word "resize"
+   135→   135→  // itself contains 'e' and 's', so 'resize-n'.includes('e') was true — the
+   136→   136→  // top handle also dragged the right edge, changing the width on every
+   137→   137→  // horizontal swipe.
+   138→   138→  const dir = dm.slice('resize-'.length)
+   139→   139→  const grabW = dir.includes('w')
+   140→   140→  const grabE = dir.includes('e')
+   141→   141→  const grabN = dir.includes('n')
+   142→   142→  const grabS = dir.includes('s')
+   143→   143→  const isCorner = dir.length === 2
+   144→   144→
+   145→   145→  // 1) Move only the grabbed edges.
+   146→   146→  if (grabW) left = start.x + dx
+   147→   147→  if (grabE) right = start.x + start.width + dx
+   148→   148→  if (grabN) top = start.y + dy
+   149→   149→  if (grabS) bottom = start.y + start.height + dy
+   150→   150→
+   151→   151→  // 2) Min size on each moved edge, anchored to the opposite edge.
+   152→   152→  if (grabW && right - left < MIN_SIZE) left = right - MIN_SIZE
+   153→   153→  if (grabE && right - left < MIN_SIZE) right = left + MIN_SIZE
+   154→   154→  if (grabN && bottom - top < MIN_SIZE) top = bottom - MIN_SIZE
+   155→   155→  if (grabS && bottom - top < MIN_SIZE) bottom = top + MIN_SIZE
+   156→   156→
+   157→   157→  // 3) Keep inside the container without crossing the opposite edge.
+   158→   158→  left = clamp(left, 0, cw)
+   159→   159→  right = clamp(right, 0, cw)
+   160→   160→  top = clamp(top, 0, ch)
+   161→   161→  bottom = clamp(bottom, 0, ch)
+   162→   162→  if (right - left < MIN_SIZE) {
+   163→   163→    if (grabW) left = Math.max(0, right - MIN_SIZE)
+   164→   164→    else right = Math.min(cw, left + MIN_SIZE)
+   165→   165→  }
+   166→   166→  if (bottom - top < MIN_SIZE) {
+   167→   167→    if (grabN) top = Math.max(0, bottom - MIN_SIZE)
+   168→   168→    else bottom = Math.min(ch, top + MIN_SIZE)
+   169→   169→  }
+   170→   170→
+   171→   171→  // 4) Ratio: corner drags only. Width leads, height follows the ratio and
+   172→   172→  // the opposite corner stays anchored. The derived size is capped by the
+   173→   173→  // room available FROM THE ANCHOR EDGES so the container clamps can never
+   174→   174→  // break the ratio (no off-ratio rects, no size snaps).
+   175→   175→  if (ratio && isCorner) {
+   176→   176→    const maxW = grabW ? right : cw - left
+   177→   177→    const maxH = grabN ? bottom : ch - top
+   178→   178→    let w = right - left
+   179→   179→    let h = w / ratio
+   180→   180→    if (h > maxH) {
+   181→   181→      h = maxH
+   182→   182→      w = h * ratio
+   183→   183→    }
+   184→   184→    if (w > maxW) {
+   185→   185→      w = maxW
+   186→   186→      h = w / ratio
+   187→   187→    }
+   188→   188→    if (grabW) left = right - w
+   189→   189→    else right = left + w
+   190→   190→    if (grabN) top = bottom - h
+   191→   191→    else bottom = top + h
+   192→   192→  }
+   193→   193→
+   194→   194→  const width = right - left
+   195→   195→  const height = bottom - top
+   196→   196→  if (width < 2 || height < 2) return start
+   197→   197→  return { x: left, y: top, width, height }
+   198→   198→}
+   199→   199→
+   200→   200→/** New rect drawn from an anchor point toward the pointer. */
+   201→   201→function createRect(
+   202→   202→  anchor: PxPoint,
+   203→   203→  pos: PxPoint,
+   204→   204→  cw: number,
+   205→   205→  ch: number,
+   206→   206→  ratio: number | null
+   207→   207→): PxRect {
+   208→   208→  const dirX = pos.x >= anchor.x ? 1 : -1
+   209→   209→  const dirY = pos.y >= anchor.y ? 1 : -1
+   210→   210→  const maxW = dirX === 1 ? cw - anchor.x : anchor.x
+   211→   211→  const maxH = dirY === 1 ? ch - anchor.y : anchor.y
+   212→   212→  let w = Math.min(Math.abs(pos.x - anchor.x), maxW)
+   213→   213→  let h = Math.min(Math.abs(pos.y - anchor.y), maxH)
+   214→   214→  if (ratio) {
+   215→   215→    h = w / ratio
+   216→   216→    if (h > maxH) {
+   217→   217→      h = maxH
+   218→   218→      w = h * ratio
+   219→   219→    }
+   220→   220→  }
+   221→   221→  if (w < 2 || h < 2) {
+   222→   222→    return { x: anchor.x, y: anchor.y, width: 0, height: 0 }
+   223→   223→  }
+   224→   224→  return {
+   225→   225→    x: dirX === 1 ? anchor.x : anchor.x - w,
+   226→   226→    y: dirY === 1 ? anchor.y : anchor.y - h,
+   227→   227→    width: w,
+   228→   228→    height: h,
+   229→   229→  }
+   230→   230→}
+   231→   231→
+   232→   232→/** Adjust an existing rect to a ratio, keeping its center. */
+   233→   233→function fitRectToRatio(
+   234→   234→  rect: PxRect,
+   235→   235→  ratio: number,
+   236→   236→  cw: number,
+   237→   237→  ch: number
+   238→   238→): PxRect {
+   239→   239→  const cx = rect.x + rect.width / 2
+   240→   240→  const cy = rect.y + rect.height / 2
+   241→   241→  let w = rect.width
+   242→   242→  let h = rect.height
+   243→   243→  if (rect.width / rect.height > ratio) h = w / ratio
+   244→   244→  else w = h * ratio
+   245→   245→  const scale = Math.min(1, cw / w, ch / h)
+   246→   246→  w *= scale
+   247→   247→  h *= scale
+   248→   248→  if (w < MIN_SIZE) {
+   249→   249→    w = MIN_SIZE
+   250→   250→    h = w / ratio
+   251→   251→  }
+   252→   252→  if (h < MIN_SIZE) {
+   253→   253→    h = MIN_SIZE
+   254→   254→    w = h * ratio
+   255→   255→  }
+   256→   256→  if (w > cw) {
+   257→   257→    w = cw
+   258→   258→    h = w / ratio
+   259→   259→  }
+   260→   260→  if (h > ch) {
+   261→   261→    h = ch
+   262→   262→    w = h * ratio
+   263→   263→  }
+   264→   264→  return {
+   265→   265→    x: clamp(cx - w / 2, 0, Math.max(0, cw - w)),
+   266→   266→    y: clamp(cy - h / 2, 0, Math.max(0, ch - h)),
+   267→   267→    width: w,
+   268→   268→    height: h,
+   269→   269→  }
+   270→   270→}
+   271→   271→
+   272→   272→/** Centered default selection (used when a preset is clicked with no rect). */
+   273→   273→function defaultRect(ratio: number | null, cw: number, ch: number): PxRect {
+   274→   274→  const r = ratio ?? cw / ch
+   275→   275→  let w = cw * DEFAULT_COVER
+   276→   276→  let h = w / r
+   277→   277→  if (h > ch * DEFAULT_COVER) {
+   278→   278→    h = ch * DEFAULT_COVER
+   279→   279→    w = h * r
+   280→   280→  }
+   281→   281→  return { x: (cw - w) / 2, y: (ch - h) / 2, width: w, height: h }
+   282→   282→}
+   283→   283→
+   284→   284→function hitTest(pos: PxPoint, rect: PxRect): DragMode | null {
+   285→   285→  const { x, y } = pos
+   286→   286→  const left = rect.x
+   287→   287→  const top = rect.y
+   288→   288→  const right = rect.x + rect.width
+   289→   289→  const bottom = rect.y + rect.height
+   290→   290→  // Corner zones shrink on small boxes so a mid-edge zone always exists —
+   291→   291→  // grabbing the side of a short/narrow box must never register as a corner
+   292→   292→  // (a corner would change both dimensions on a one-axis gesture).
+   293→   293→  const hz = Math.min(HANDLE_SIZE, rect.width / 2)
+   294→   294→  const vz = Math.min(HANDLE_SIZE, rect.height / 2)
+   295→   295→
+   296→   296→  if (Math.abs(x - left) < hz && Math.abs(y - top) < vz) return 'resize-nw'
+   297→   297→  if (Math.abs(x - right) < hz && Math.abs(y - top) < vz) return 'resize-ne'
+   298→   298→  if (Math.abs(x - left) < hz && Math.abs(y - bottom) < vz) return 'resize-sw'
+   299→   299→  if (Math.abs(x - right) < hz && Math.abs(y - bottom) < vz) return 'resize-se'
+   300→   300→  if (Math.abs(y - top) < vz && x > left && x < right) return 'resize-n'
+   301→   301→  if (Math.abs(y - bottom) < vz && x > left && x < right) return 'resize-s'
+   302→   302→  // Side handles also accept grabs a few px OUTSIDE the edge (the visible
+   303→   303→  // border straddles the rect boundary, and a flush edge at x=0 or x=cw
+   304→   304→  // previously fell through and started a brand-new selection).
+   305→   305→  if (Math.abs(x - left) < hz && y > top && y < bottom) return 'resize-w'
+   306→   306→  if (Math.abs(x - right) < hz && y > top && y < bottom) return 'resize-e'
+   307→   307→  if (x > left && x < right && y > top && y < bottom) return 'moving'
+   308→   308→  return null
+   309→   309→}
+   310→   310→
+   311→   311→const HANDLE_CURSORS: Record<DragMode, string> = {
+   312→   312→  moving: 'move',
+   313→   313→  'resize-nw': 'nwse-resize',
+   314→   314→  'resize-ne': 'nesw-resize',
+   315→   315→  'resize-sw': 'nesw-resize',
+   316→   316→  'resize-se': 'nwse-resize',
+   317→   317→  'resize-n': 'ns-resize',
+   318→   318→  'resize-s': 'ns-resize',
+   319→   319→  'resize-e': 'ew-resize',
+   320→   320→  'resize-w': 'ew-resize',
+   321→   321→}
+   322→   322→
+   323→   323→function formatBytes(bytes: number): string {
+   324→   324→  if (bytes === 0) return '0 B'
+   325→   325→  const k = 1024
+   326→   326→  const sizes = ['B', 'KB', 'MB', 'GB']
+   327→   327→  const i = Math.floor(Math.log(bytes) / Math.log(k))
+   328→   328→  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+   329→   329→}
+   330→   330→
+   331→   331→export function CropImagesView({
+   332→   332→  files,
+   333→   333→  onRemove,
+   334→   334→  onAddMore,
+   335→   335→  onChange,
+   336→   336→}: CropImagesViewProps) {
+   337→   337→  const [meta, setMeta] = React.useState<Record<string, ImageMeta>>({})
+   338→   338→  const [activeId, setActiveId] = React.useState<string | null>(null)
+   339→   339→  const [relCrops, setRelCrops] = React.useState<Record<string, RelRect>>({})
+   340→   340→  const [ratio, setRatio] = React.useState<Ratio>('free')
+   341→   341→  const [containerSize, setContainerSize] = React.useState({ w: 0, h: 0 })
+   342→   342→
+   343→   343→  const containerRef = React.useRef<HTMLDivElement>(null)
+   344→   344→  // Drag session state — only ever read/written inside pointer event
+   345→   345→  // handlers, so mutating it outside render is safe (and lint-clean).
+   346→   346→  // `ratio` locks the aspect ratio for the whole drag, `lastRect` keeps the
+   347→   347→  // newest px rect so the drag-end check never depends on render timing.
+   348→   348→  const drag = React.useRef<{
+   349→   349→    mode: DragMode | 'creating'
+   350→   350→    anchor: PxPoint
+   351→   351→    start: PxRect | null
+   352→   352→    box: { w: number; h: number }
+   353→   353→    ratio: number | null
+   354→   354→    lastRect: PxRect | null
+   355→   355→  } | null>(null)
+   356→   356→
+   357→   357→  const urlsRef = React.useRef<Record<string, string>>({})
+   358→   358→
+   359→   359→  /* ---------------- Load image metadata (size + object URL) ------------- */
+   360→   360→  React.useEffect(() => {
+   361→   361→    let cancelled = false
+   362→   362→
+   363→   363→    setMeta((prev) => {
+   364→   364→      const next: Record<string, ImageMeta> = {}
+   365→   365→      for (const f of files) {
+   366→   366→        if (prev[f.id]) next[f.id] = prev[f.id]
+   367→   367→      }
+   368→   368→      for (const id of Object.keys(urlsRef.current)) {
+   369→   369→        if (!next[id] && urlsRef.current[id]) {
+   370→   370→          URL.revokeObjectURL(urlsRef.current[id])
+   371→   371→          delete urlsRef.current[id]
+   372→   372→        }
+   373→   373→      }
+   374→   374→      return next
+   375→   375→    })
+   376→   376→
+   377→   377→    const missing = files.filter((f) => !urlsRef.current[f.id])
+   378→   378→    for (const f of missing) {
+   379→   379→      const url = URL.createObjectURL(f.file)
+   380→   380→      urlsRef.current[f.id] = url
+   381→   381→      const img = new Image()
+   382→   382→      img.onload = () => {
+   383→   383→        if (cancelled) return
+   384→   384→        setMeta((prev) => ({
+   385→   385→          ...prev,
+   386→   386→          [f.id]: {
+   387→   387→            url,
+   388→   388→            width: img.naturalWidth || 1,
+   389→   389→            height: img.naturalHeight || 1,
+   390→   390→          },
+   391→   391→        }))
+   392→   392→      }
+   393→   393→      img.onerror = () => {
+   394→   394→        if (cancelled) return
+   395→   395→        setMeta((prev) => ({
+   396→   396→          ...prev,
+   397→   397→          [f.id]: { url, width: 1, height: 1 },
+   398→   398→        }))
+   399→   399→      }
+   400→   400→      img.src = url
+   401→   401→    }
+   402→   402→
+   403→   403→    return () => {
+   404→   404→      cancelled = true
+   405→   405→    }
+   406→   406→  }, [files])
+   407→   407→
+   408→   408→  // Revoke everything on unmount.
+   409→   409→  React.useEffect(() => {
+   410→   410→    const urls = urlsRef.current
+   411→   411→    return () => {
+   412→   412→      for (const id of Object.keys(urls)) URL.revokeObjectURL(urls[id])
+   413→   413→    }
+   414→   414→  }, [])
+   415→   415→
+   416→   416→  /* ---------------- Keep a valid active selection ------------------------ */
+   417→   417→  React.useEffect(() => {
+   418→   418→    if (files.length === 0) {
+   419→   419→      setActiveId(null)
+   420→   420→      return
+   421→   421→    }
+   422→   422→    if (!activeId || !files.some((f) => f.id === activeId)) {
+   423→   423→      const firstWithoutCrop = files.find((f) => !relCrops[f.id]) ?? files[0]
+   424→   424→      setActiveId(firstWithoutCrop.id)
+   425→   425→    }
+   426→   426→  }, [files, activeId, relCrops])
+   427→   427→
+   428→   428→  /* ---------------- Editing state for the active image ------------------- */
+   429→   429→  // NOTE: must be declared before the layout effect below — dependency arrays
+   430→   430→  // evaluate synchronously during render, so referencing `activeMeta` from a
+   431→   431→  // later `const` would throw a TDZ ReferenceError.
+   432→   432→  const activeFile = files.find((f) => f.id === activeId) ?? null
+   433→   433→  const activeMeta = activeId ? meta[activeId] ?? null : null
+   434→   434→  const activeRel = activeId ? relCrops[activeId] ?? null : null
+   435→   435→
+   436→   436→  /* ---------------- Container measurement -------------------------------- */
+   437→   437→  const updateSize = React.useCallback(() => {
+   438→   438→    const el = containerRef.current
+   439→   439→    if (!el) return
+   440→   440→    setContainerSize((prev) => {
+   441→   441→      const w = el.clientWidth
+   442→   442→      const h = el.clientHeight
+   443→   443→      if (w === prev.w && h === prev.h) return prev
+   444→   444→      return { w, h }
+   445→   445→    })
+   446→   446→  }, [])
+   447→   447→
+   448→   448→  // Measure synchronously before paint so the overlay is never stale after
+   449→   449→  // switching images (this was the source of stretched/contracted rects).
+   450→   450→  React.useLayoutEffect(() => {
+   451→   451→    updateSize()
+   452→   452→    const el = containerRef.current
+   453→   453→    if (!el) return
+   454→   454→    const ro = new ResizeObserver(updateSize)
+   455→   455→    ro.observe(el)
+   456→   456→    return () => ro.disconnect()
+   457→   457→  }, [activeId, activeMeta, updateSize])
+   458→   458→
+   459→   459→  /* ---------------- Emit result whenever crops change -------------------- */
+   460→   460→  const croppedCount = files.filter((f) => relCrops[f.id]).length
+   461→   461→
+   462→   462→  React.useEffect(() => {
+   463→   463→    const crops: CropImagesResult['crops'] = {}
+   464→   464→    for (const f of files) {
+   465→   465→      const rel = relCrops[f.id]
+   466→   466→      const m = meta[f.id]
+   467→   467→      if (rel && m) {
+   468→   468→        crops[f.file.name] = {
+   469→   469→          x: Math.round(rel.x * m.width),
+   470→   470→          y: Math.round(rel.y * m.height),
+   471→   471→          width: Math.max(1, Math.round(rel.w * m.width)),
+   472→   472→          height: Math.max(1, Math.round(rel.h * m.height)),
+   473→   473→        }
+   474→   474→      }
+   475→   475→    }
+   476→   476→    onChange(Object.keys(crops).length > 0 ? { crops } : null)
+   477→   477→  }, [files, relCrops, meta, onChange])
+   478→   478→
+   479→   479→  const setRelFromPx = React.useCallback(
+   480→   480→    (rect: PxRect | null, box: { w: number; h: number }) => {
+   481→   481→      if (!activeId) return
+   482→   482→      setRelCrops((prev) => {
+   483→   483→        const next = { ...prev }
+   484→   484→        if (!rect || rect.width <= 0 || rect.height <= 0) {
+   485→   485→          delete next[activeId]
+   486→   486→        } else {
+   487→   487→          next[activeId] = {
+   488→   488→            x: rect.x / box.w,
+   489→   489→            y: rect.y / box.h,
+   490→   490→            w: rect.width / box.w,
+   491→   491→            h: rect.height / box.h,
+   492→   492→          }
+   493→   493→        }
+   494→   494→        return next
+   495→   495→      })
+   496→   496→    },
+   497→   497→    [activeId]
+   498→   498→  )
+   499→   499→
+   500→   500→  const activePx: PxRect | null =
+   501→   501→    activeRel && containerSize.w > 0 && containerSize.h > 0
+   502→   502→      ? relToPx(activeRel, containerSize.w, containerSize.h)
+   503→   503→      : null
+   504→   504→
+   505→   505→  /* ---------------- Pointer interaction ----------------------------------- */
+   506→   506→  const posFromEvent = (e: React.PointerEvent): PxPoint => {
+   507→   507→    const el = containerRef.current
+   508→   508→    if (!el) return { x: 0, y: 0 }
+   509→   509→    const r = el.getBoundingClientRect()
+   510→   510→    // The container has a border; the overlay lives inside it. Subtract the
+   511→   511→    // border so pointer coordinates share the exact space as clientWidth and
+   512→   512→    // the absolutely positioned crop rect (otherwise every hit is offset).
+   513→   513→    return {
+   514→   514→      x: clamp(e.clientX - r.left - el.clientLeft, 0, el.clientWidth),
+   515→   515→      y: clamp(e.clientY - r.top - el.clientTop, 0, el.clientHeight),
+   516→   516→    }
+   517→   517→  }
+   518→   518→
+   519→   519→  const onPointerDown = (e: React.PointerEvent) => {
+   520→   520→    if (!activeMeta || e.button !== 0) return
+   521→   521→    const el = containerRef.current
+   522→   522→    if (!el) return
+   523→   523→    const box = { w: el.clientWidth, h: el.clientHeight }
+   524→   524→    if (!box.w || !box.h) return
+   525→   525→    // Capture the pointer: drags keep working even when the cursor leaves
+   526→   526→    // the image, and the up-event can never be missed.
+   527→   527→    try {
+   528→   528→      el.setPointerCapture(e.pointerId)
+   529→   529→    } catch {
+   530→   530→      // ignore — capture is best-effort
+   531→   531→    }
+   532→   532→    const pos = posFromEvent(e)
+   533→   533→    const px = activeRel ? relToPx(activeRel, box.w, box.h) : null
+   534→   534→    const hit = px ? hitTest(pos, px) : null
+   535→   535→    // Lock the aspect ratio for the entire drag at pointer-down time.
+   536→   536→    const dragRatio = ratioValue(ratio, activeMeta)
+   537→   537→    if (hit && px) {
+   538→   538→      // Safety net: a CORNER resize with a locked ratio must start from a
+   539→   539→      // rect that is EXACTLY at that ratio (corner math derives height from
+   540→   540→      // width, so an off-ratio start — e.g. after a single-axis mid-edge
+   541→   541→      // drag — would jump on the first move). Mid-edge handles are strictly
+   542→   542→      // single-axis and never consult the ratio, so they must NOT snap:
+   543→   543→      // snapping would undo the user's one-axis adjustment at grab time.
+   544→   544→      const cornerHit =
+   545→   545→        hit === 'resize-nw' ||
+   546→   546→        hit === 'resize-ne' ||
+   547→   547→        hit === 'resize-sw' ||
+   548→   548→        hit === 'resize-se'
+   549→   549→      let startRect: PxRect = { ...px }
+   550→   550→      if (dragRatio && cornerHit) {
+   551→   551→        const snapped = fitRectToRatio(px, dragRatio, box.w, box.h)
+   552→   552→        if (
+   553→   553→          Math.abs(snapped.width - px.width) > 0.5 ||
+   554→   554→          Math.abs(snapped.height - px.height) > 0.5
+   555→   555→        ) {
+   556→   556→          setRelFromPx(snapped, box)
+   557→   557→        }
+   558→   558→        startRect = snapped
+   559→   559→      }
+   560→   560→      drag.current = {
+   561→   561→        mode: hit,
+   562→   562→        anchor: pos,
+   563→   563→        start: startRect,
+   564→   564→        box,
+   565→   565→        ratio: dragRatio,
+   566→   566→        lastRect: { ...startRect },
+   567→   567→      }
+   568→   568→    } else {
+   569→   569→      const seed = { x: pos.x, y: pos.y, width: 0, height: 0 }
+   570→   570→      drag.current = {
+   571→   571→        mode: 'creating',
+   572→   572→        anchor: pos,
+   573→   573→        start: null,
+   574→   574→        box,
+   575→   575→        ratio: dragRatio,
+   576→   576→        lastRect: seed,
+   577→   577→      }
+   578→   578→      setRelFromPx(seed, box)
+   579→   579→    }
+   580→   580→  }
+   581→   581→
+   582→   582→  const onPointerMove = (e: React.PointerEvent) => {
+   583→   583→    const d = drag.current
+   584→   584→    if (!d) return
+   585→   585→    const pos = posFromEvent(e)
+   586→   586→    const { w: cw, h: ch } = d.box
+   587→   587→    if (d.mode === 'creating') {
+   588→   588→      const r = createRect(d.anchor, pos, cw, ch, d.ratio)
+   589→   589→      d.lastRect = r
+   590→   590→      setRelFromPx(r, d.box)
+   591→   591→      return
+   592→   592→    }
+   593→   593→    if (!d.start) return
+   594→   594→    const dx = pos.x - d.anchor.x
+   595→   595→    const dy = pos.y - d.anchor.y
+   596→   596→    if (d.mode === 'moving') {
+   597→   597→      const x = clamp(d.start.x + dx, 0, Math.max(0, cw - d.start.width))
+   598→   598→      const y = clamp(d.start.y + dy, 0, Math.max(0, ch - d.start.height))
+   599→   599→      setRelFromPx({ ...d.start, x, y }, d.box)
+   600→   600→      return
+   601→   601→    }
+   602→   602→    const next = resizeWithHandles(d.mode, d.start, dx, dy, cw, ch, d.ratio)
+   603→   603→    d.lastRect = next
+   604→   604→    setRelFromPx(next, d.box)
+   605→   605→  }
+   606→   606→
+   607→   607→  const endDrag = () => {
+   608→   608→    const d = drag.current
+   609→   609→    drag.current = null
+   610→   610→    if (d && d.mode === 'creating' && d.lastRect) {
+   611→   611→      // Discard accidental tiny selections (e.g. a single click).
+   612→   612→      if (d.lastRect.width < MIN_SIZE || d.lastRect.height < MIN_SIZE) {
+   613→   613→        setRelFromPx(null, d.box)
+   614→   614→      }
+   615→   615→    }
+   616→   616→  }
+   617→   617→
+   618→   618→  /* ---------------- Toolbar actions --------------------------------------- */
+   619→   619→  const applyRatioPreset = (r: Ratio) => {
+   620→   620→    setRatio(r)
+   621→   621→    const el = containerRef.current
+   622→   622→    if (!el || !activeMeta) return
+   623→   623→    const cw = el.clientWidth
+   624→   624→    const ch = el.clientHeight
+   625→   625→    if (!cw || !ch) return
+   626→   626→    const box = { w: cw, h: ch }
+   627→   627→    if (r === 'free') {
+   628→   628→      // Free with nothing selected: show a default centered rect.
+   629→   629→      if (!activeRel) setRelFromPx(defaultRect(null, cw, ch), box)
+   630→   630→      return
+   631→   631→    }
+   632→   632→    const ratio = ratioValue(r, activeMeta)
+   633→   633→    if (!ratio) return
+   634→   634→    if (activeRel) {
+   635→   635→      // Keep the user's placement: adjust the existing rect to the ratio.
+   636→   636→      setRelFromPx(fitRectToRatio(relToPx(activeRel, cw, ch), ratio, cw, ch), box)
+   637→   637→    } else {
+   638→   638→      // No rect yet: immediately show one at the chosen ratio.
+   639→   639→      setRelFromPx(defaultRect(ratio, cw, ch), box)
+   640→   640→    }
+   641→   641→  }
+   642→   642→
+   643→   643→  const selectFull = () => {
+   644→   644→    const el = containerRef.current
+   645→   645→    if (!el || !activeId) return
+   646→   646→    const box = { w: el.clientWidth, h: el.clientHeight }
+   647→   647→    const full: PxRect = { x: 0, y: 0, width: box.w, height: box.h }
+   648→   648→    // Respect the active ratio: an off-ratio "full" rect would snap its
+   649→   649→    // width the moment any handle is dragged. Fit the largest ratio-correct
+   650→   650→    // rect inside the full area, centered.
+   651→   651→    const r = ratioValue(ratio, activeMeta)
+   652→   652→    setRelFromPx(r ? fitRectToRatio(full, r, box.w, box.h) : full, box)
+   653→   653→  }
+   654→   654→
+   655→   655→  const resetCrop = () => {
+   656→   656→    if (!activeId) return
+   657→   657→    setRelCrops((prev) => {
+   658→   658→      const next = { ...prev }
+   659→   659→      delete next[activeId]
+   660→   660→      return next
+   661→   661→    })
+   662→   662→  }
+   663→   663→
+   664→   664→  const copyToAll = () => {
+   665→   665→    if (!activeRel) return
+   666→   666→    setRelCrops(() => {
+   667→   667→      const next: Record<string, RelRect> = {}
+   668→   668→      for (const f of files) {
+   669→   669→        const m = meta[f.id]
+   670→   670→        // Fixed presets are absolute; "Original" means each image's own.
+   671→   671→        const r =
+   672→   672→          ratio === 'free'
+   673→   673→            ? null
+   674→   674→            : ratio === 'original' && m
+   675→   675→              ? m.width / m.height
+   676→   676→              : ratioValue(ratio, activeMeta)
+   677→   677→        if (r && m) {
+   678→   678→          // Fit the copied region to the ratio in THIS image's pixel space,
+   679→   679→          // so no image ends up with an off-ratio rect that would snap on
+   680→   680→          // the next handle drag.
+   681→   681→          const fitted = fitRectToRatio(
+   682→   682→            {
+   683→   683→              x: activeRel.x * m.width,
+   684→   684→              y: activeRel.y * m.height,
+   685→   685→              width: activeRel.w * m.width,
+   686→   686→              height: activeRel.h * m.height,
+   687→   687→            },
+   688→   688→            r,
+   689→   689→            m.width,
+   690→   690→            m.height
+   691→   691→          )
+   692→   692→          next[f.id] = {
+   693→   693→            x: fitted.x / m.width,
+   694→   694→            y: fitted.y / m.height,
+   695→   695→            w: fitted.width / m.width,
+   696→   696→            h: fitted.height / m.height,
+   697→   697→          }
+   698→   698→        } else {
+   699→   699→          next[f.id] = { ...activeRel }
+   700→   700→        }
+   701→   701→      }
+   702→   702→      return next
+   703→   703→    })
+   704→   704→  }
+   705→   705→
+   706→   706→  const removeItem = (id: string) => {
+   707→   707→    setRelCrops((prev) => {
+   708→   708→      const next = { ...prev }
+   709→   709→      delete next[id]
+   710→   710→      return next
+   711→   711→    })
+   712→   712→    onRemove(id)
+   713→   713→  }
+   714→   714→
+   715→   715→  /* ---------------- Render ------------------------------------------------- */
+   716→   716→  const loadingMeta = files.some((f) => !meta[f.id])
+   717→   717→
+   718→   718→  if (files.length === 0) return null
+   719→   719→
+   720→   720→  return (
+   721→   721→    <div className="space-y-4">
+   722→   722→      {/* Instructions */}
+   723→   723→      <div className="flex flex-wrap items-center justify-between gap-2">
+   724→   724→        <p className="text-sm text-muted-foreground">
+   725→   725→          Draw a crop region on each image — switch images below. When you are
+   726→   726→          done, hit{' '}
+   727→   727→          <span className="font-medium text-foreground">Run Crop Images</span>{' '}
+   728→   728→          to apply.
+   729→   729→        </p>
+   730→   730→        {croppedCount > 0 && (
+   731→   731→          <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-500/20 dark:text-emerald-300">
+   732→   732→            <Check className="h-3.5 w-3.5" />
+   733→   733→            {croppedCount} of {files.length} cropped
+   734→   734→          </span>
+   735→   735→        )}
+   736→   736→      </div>
+   737→   737→
+   738→   738→      {/* Crop editor */}
+   739→   739→      {loadingMeta && !activeMeta ? (
+   740→   740→        <div className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
+   741→   741→          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+   742→   742→          <p className="text-sm">Loading images…</p>
+   743→   743→        </div>
+   744→   744→      ) : activeMeta && activeFile ? (
+   745→   745→        <>
+   746→   746→          {/* Ratio presets + actions */}
+   747→   747→          <div className="flex flex-wrap items-center gap-2">
+   748→   748→            <div className="flex flex-wrap items-center gap-1.5">
+   749→   749→              {RATIO_PRESETS.map((r) => (
+   750→   750→                <button
+   751→   751→                  key={r.id}
+   752→   752→                  type="button"
+   753→   753→                  onClick={() => applyRatioPreset(r.id)}
+   754→   754→                  className={cn(
+   755→   755→                    'rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
+   756→   756→                    ratio === r.id
+   757→   757→                      ? 'bg-primary text-primary-foreground shadow-sm'
+   758→   758→                      : 'bg-secondary text-secondary-foreground hover:bg-secondary/70'
+   759→   759→                  )}
+   760→   760→                >
+   761→   761→                  {r.label}
+   762→   762→                </button>
+   763→   763→              ))}
+   764→   764→            </div>
+   765→   765→            <div className="ml-auto flex flex-wrap items-center gap-2">
+   766→   766→              <Button
+   767→   767→                size="sm"
+   768→   768→                variant="outline"
+   769→   769→                onClick={selectFull}
+   770→   770→                className="gap-1.5"
+   771→   771→              >
+   772→   772→                <Square className="h-3.5 w-3.5" /> Full area
+   773→   773→              </Button>
+   774→   774→              <Button
+   775→   775→                size="sm"
+   776→   776→                variant="outline"
+   777→   777→                onClick={resetCrop}
+   778→   778→                disabled={!activeRel}
+   779→   779→                className="gap-1.5"
+   780→   780→              >
+   781→   781→                <RotateCcw className="h-3.5 w-3.5" /> Reset
+   782→   782→              </Button>
+   783→   783→              <Button
+   784→   784→                size="sm"
+   785→   785→                variant="outline"
+   786→   786→                onClick={copyToAll}
+   787→   787→                disabled={!activeRel || files.length < 2}
+   788→   788→                className="gap-1.5"
+   789→   789→              >
+   790→   790→                <Copy className="h-3.5 w-3.5" /> Copy to all
+   791→   791→              </Button>
+   792→   792→            </div>
+   793→   793→          </div>
+   794→   794→
+   795→   795→          {/* Image + overlay */}
+   796→   796→          <div className="flex justify-center">
+   797→   797→            <div
+   798→   798→              ref={containerRef}
+   799→   799→              className="relative cursor-crosshair select-none overflow-hidden rounded-lg border-2 border-border bg-muted shadow-sm"
+   800→   800→              style={{ maxWidth: '100%', lineHeight: 0, touchAction: 'none' }}
+   801→   801→              onPointerDown={onPointerDown}
+   802→   802→              onPointerMove={onPointerMove}
+   803→   803→              onPointerUp={endDrag}
+   804→   804→              onPointerCancel={endDrag}
+   805→   805→            >
+   806→   806→              {/* Active image */}
+   807→   807→              <img
+   808→   808→                src={activeMeta.url}
+   809→   809→                alt={activeFile.file.name}
+   810→   810→                className="block max-h-[60vh] w-auto max-w-full"
+   811→   811→                draggable={false}
+   812→   812→              />
+   813→   813→
+   814→   814→              {activePx && activePx.width > 0 && (
+   815→   815→                <>
+   816→   816→                  {/* Dimmed area outside the crop */}
+   817→   817→                  <div
+   818→   818→                    className="pointer-events-none absolute inset-0 bg-black/40"
+   819→   819→                    style={{
+   820→   820→                      clipPath: `polygon(0 0, 0 100%, ${activePx.x}px 100%, ${activePx.x}px ${activePx.y}px, ${activePx.x + activePx.width}px ${activePx.y}px, ${activePx.x + activePx.width}px ${activePx.y + activePx.height}px, ${activePx.x}px ${activePx.y + activePx.height}px, ${activePx.x}px 100%, 100% 100%, 100% 0)`,
+   821→   821→                    }}
+   822→   822→                  />
+   823→   823→                  {/* Selection border + thirds guide + handles */}
+   824→   824→                  <div
+   825→   825→                    className="pointer-events-none absolute border-2 border-primary"
+   826→   826→                    style={{
+   827→   827→                      left: activePx.x,
+   828→   828→                      top: activePx.y,
+   829→   829→                      width: activePx.width,
+   830→   830→                      height: activePx.height,
+   831→   831→                    }}
+   832→   832→                  >
+   833→   833→                    <div className="absolute inset-0">
+   834→   834→                      <div className="absolute left-1/3 top-0 h-full w-px bg-white/25" />
+   835→   835→                      <div className="absolute left-2/3 top-0 h-full w-px bg-white/25" />
+   836→   836→                      <div className="absolute left-0 top-1/3 h-px w-full bg-white/25" />
+   837→   837→                      <div className="absolute left-0 top-2/3 h-px w-full bg-white/25" />
+   838→   838→                    </div>
+   839→   839→                    {(['nw', 'ne', 'sw', 'se', 'n', 's', 'e', 'w'] as const).map(
+   840→   840→                      (h) => {
+   841→   841→                        const handleStyle: React.CSSProperties = {
+   842→   842→                          position: 'absolute',
+   843→   843→                          width: HANDLE_SIZE,
+   844→   844→                          height: HANDLE_SIZE,
+   845→   845→                          background: 'white',
+   846→   846→                          border: '2px solid hsl(var(--primary))',
+   847→   847→                          borderRadius: '2px',
+   848→   848→                        }
+   849→   849→                        if (h.includes('n')) handleStyle.top = -HANDLE_SIZE / 2
+   850→   850→                        if (h.includes('s')) handleStyle.bottom = -HANDLE_SIZE / 2
+   851→   851→                        if (h.includes('w')) handleStyle.left = -HANDLE_SIZE / 2
+   852→   852→                        if (h.includes('e')) handleStyle.right = -HANDLE_SIZE / 2
+   853→   853→                        if (h === 'n' || h === 's') {
+   854→   854→                          handleStyle.left = '50%'
+   855→   855→                          handleStyle.transform = 'translateX(-50%)'
+   856→   856→                          handleStyle.width = HANDLE_SIZE * 2
+   857→   857→                        }
+   858→   858→                        if (h === 'e' || h === 'w') {
+   859→   859→                          handleStyle.top = '50%'
+   860→   860→                          handleStyle.transform = 'translateY(-50%)'
+   861→   861→                          handleStyle.height = HANDLE_SIZE * 2
+   862→   862→                        }
+   863→   863→                        const dm = ('resize-' + h) as DragMode
+   864→   864→                        handleStyle.cursor = HANDLE_CURSORS[dm]
+   865→   865→                        return <div key={h} style={handleStyle} />
+   866→   866→                      }
+   867→   867→                    )}
+   868→   868→                  </div>
+   869→   869→                </>
+   870→   870→              )}
+   871→   871→            </div>
+   872→   872→          </div>
+   873→   873→
+   874→   874→          {/* Crop dimensions */}
+   875→   875→          <div className="flex flex-wrap items-center justify-between gap-3">
+   876→   876→            <p className="text-xs text-muted-foreground">
+   877→   877→              Editing:{' '}
+   878→   878→              <span className="font-medium text-foreground">
+   879→   879→                {activeFile.file.name}
+   880→   880→              </span>{' '}
+   881→   881→              ({activeMeta.width}×{activeMeta.height})
+   882→   882→            </p>
+   883→   883→            {activePx && activeMeta && containerSize.w > 0 && (
+   884→   884→              <p className="text-xs text-muted-foreground">
+   885→   885→                Crop:{' '}
+   886→   886→                <strong className="text-foreground">
+   887→   887→                  {Math.max(
+   888→   888→                    1,
+   889→   889→                    Math.round(
+   890→   890→                      (activePx.width / containerSize.w) * activeMeta.width
+   891→   891→                    )
+   892→   892→                  )}
+   893→   893→                  ×
+   894→   894→                  {Math.max(
+   895→   895→                    1,
+   896→   896→                    Math.round(
+   897→   897→                      (activePx.height / containerSize.h) * activeMeta.height
+   898→   898→                    )
+   899→   899→                  )}
+   900→   900→                </strong>{' '}
+   901→   901→                px
+   902→   902→              </p>
+   903→   903→            )}
+   904→   904→          </div>
+   905→   905→        </>
+   906→   906→      ) : null}
+   907→   907→
+   908→   908→      {/* Batch queue strip */}
+   909→   909→      <div className="border-t border-border/60 pt-3">
+   910→   910→        <p className="mb-2 text-xs font-medium text-muted-foreground">
+   911→   911→          Click an image to edit it:
+   912→   912→        </p>
+   913→   913→        <div className="flex gap-2 overflow-x-auto pb-2">
+   914→   914→          {files.map((f) => {
+   915→   915→            const m = meta[f.id]
+   916→   916→            const done = !!relCrops[f.id]
+   917→   917→            const isActive = activeId === f.id
+   918→   918→            return (
+   919→   919→              <div
+   920→   920→                key={f.id}
+   921→   921→                className={cn(
+   922→   922→                  'group relative shrink-0 overflow-hidden rounded-lg border-2 transition-all',
+   923→   923→                  isActive
+   924→   924→                    ? 'border-primary ring-2 ring-primary/20'
+   925→   925→                    : 'border-border hover:border-primary/40'
+   926→   926→                )}
+   927→   927→              >
+   928→   928→                <button
+   929→   929→                  type="button"
+   930→   930→                  onClick={() => setActiveId(f.id)}
+   931→   931→                  className="block cursor-pointer"
+   932→   932→                  aria-label={`Edit ${f.file.name}`}
+   933→   933→                >
+   934→   934→                  {m ? (
+   935→   935→                    <img
+   936→   936→                      src={m.url}
+   937→   937→                      alt={f.file.name}
+   938→   938→                      className="h-20 w-28 bg-muted object-cover"
+   939→   939→                      draggable={false}
+   940→   940→                    />
+   941→   941→                  ) : (
+   942→   942→                    <div className="grid h-20 w-28 place-items-center bg-muted">
+   943→   943→                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+   944→   944→                    </div>
+   945→   945→                  )}
+   946→   946→                  <span className="absolute bottom-0 left-0 right-0 truncate bg-black/70 px-1.5 py-0.5 text-left text-[9px] font-medium text-white">
+   947→   947→                    {f.file.name} · {formatBytes(f.file.size)}
+   948→   948→                  </span>
+   949→   949→                  {done && (
+   950→   950→                    <span className="absolute left-1 top-1 grid h-4 w-4 place-items-center rounded-full bg-emerald-500 text-white">
+   951→   951→                      <Check className="h-3 w-3" />
+   952→   952→                    </span>
+   953→   953→                  )}
+   954→   954→                </button>
+   955→   955→                <button
+   956→   956→                  type="button"
+   957→   957→                  onClick={() => removeItem(f.id)}
+   958→   958→                  className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-destructive group-hover:opacity-100"
+   959→   959→                  aria-label={`Remove ${f.file.name}`}
+   960→   960→                >
+   961→   961→                  <X className="h-3 w-3" />
+   962→   962→                </button>
+   963→   963→              </div>
+   964→   964→            )
+   965→   965→          })}
+   966→   966→
+   967→   967→          {/* Add more tile */}
+   968→   968→          <button
+   969→   969→            type="button"
+   970→   970→            onClick={onAddMore}
+   971→   971→            className="grid h-20 w-28 shrink-0 cursor-pointer place-items-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+   972→   972→            aria-label="Add more images"
+   973→   973→          >
+   974→   974→            <span className="flex flex-col items-center gap-1">
+   975→   975→              <ImagePlus className="h-5 w-5" />
+   976→   976→              <span className="text-[10px] font-medium">Add more</span>
+   977→   977→            </span>
+   978→   978→          </button>
+   979→   979→        </div>
+   980→   980→      </div>
+   981→   981→
+   982→   982→      {/* No crop drawn hint */}
+   983→   983→      {croppedCount === 0 && (
+   984→   984→        <div className="flex items-start gap-3 rounded-xl border border-orange-500/30 bg-orange-500/5 p-4 text-sm">
+   985→   985→          <CropIcon className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+   986→   986→          <p className="text-muted-foreground">
+   987→   987→            Draw a crop region on at least one image to enable processing.
+   988→   988→            Images without a crop will be skipped. Use{' '}
+   989→   989→            <span className="font-medium text-foreground">Copy to all</span> to
+   990→   990→            apply the same crop region to every image at once.
+   991→   991→          </p>
+   992→   992→        </div>
+   993→   993→      )}
+   994→   994→    </div>
+   995→   995→  )
+   996→   996→}
+   997→   997→

@@ -28,6 +28,7 @@ import {
   Shrink,
   Scaling,
   Image as ImageIcon,
+  Brush,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -244,6 +245,18 @@ export const tools: Tool[] = [
       "Render pasted HTML code or an uploaded .html file into a crisp PNG, JPG or WebP screenshot — pick the render width, scale, quality and background. Everything runs in your browser.",
     category: "image",
     icon: ImageIcon,
+    accent: "orange",
+    batch: false,
+    step: 8,
+  },
+
+  {
+    id: "photo-editor",
+    name: "Photo Editor",
+    description:
+      "Just a basic photo editor — crop, resize, rotate and flip, tune filters and light, draw, add text, shapes and frames. Simple edits, 100% in your browser.",
+    category: "image",
+    icon: Brush,
     accent: "orange",
     batch: false,
     step: 8,
