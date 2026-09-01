@@ -43,6 +43,8 @@ export type ProcessorType =
   | 'blur-faces'
   | 'compress-images'
   | 'resize-images'
+  // Step 8 — HTML rendering
+  | 'html-to-image'
 
 export interface ProcessInput {
   id: string

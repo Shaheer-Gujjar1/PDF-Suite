@@ -27,6 +27,7 @@ import {
   ScanFace,
   Shrink,
   Scaling,
+  Image as ImageIcon,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -234,6 +235,18 @@ export const tools: Tool[] = [
     batch: true,
     step: 7,
     locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+
+  {
+    id: "html-to-image",
+    name: "HTML to Image",
+    description:
+      "Render pasted HTML code or an uploaded .html file into a crisp PNG, JPG or WebP screenshot — pick the render width, scale, quality and background. Everything runs in your browser.",
+    category: "image",
+    icon: ImageIcon,
+    accent: "orange",
+    batch: false,
+    step: 8,
   },
 
   // ---------- Organize ----------

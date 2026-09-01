@@ -30,6 +30,7 @@ import { ImagesToPdfView, type ImagesToPdfConfig } from '@/components/tools/imag
 import { PdfToImageView, type PdfToImagesConfig } from '@/components/tools/pdf-to-images-view'
 import { WordToPdfView, type WordFile } from '@/components/tools/word-to-pdf-view'
 import { HtmlToPdfView, type HtmlToPdfConfig } from '@/components/tools/html-to-pdf-view'
+import { HtmlToImageView, type HtmlToImageConfig } from '@/components/tools/html-to-image-view'
 import { PdfToExcelView } from '@/components/tools/pdf-to-excel-view'
 import { PageNumbersPreview } from '@/components/tools/page-numbers-preview'
 import { renderDocxToPages } from '@/lib/docx-renderer'
@@ -79,6 +80,23 @@ interface InputConfig {
   mode: 'files' | 'text'
 }
 
+/** Load html2canvas from CDN once and wait until it is actually usable. */
+async function ensureHtml2Canvas(): Promise<void> {
+  const w = window as any
+  if (w.html2canvas) return
+  if (!document.querySelector('script[data-html2canvas="1"]')) {
+    const s = document.createElement('script')
+    s.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js'
+    s.setAttribute('data-html2canvas', '1')
+    document.head.appendChild(s)
+  }
+  for (let i = 0; i < 50; i++) {
+    if (w.html2canvas) return
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  throw new Error('Could not load the local rendering engine — check your connection and try again.')
+}
+
 function getInput(tool: Tool): InputConfig {
   switch (tool.id) {
     case 'crop-images':
@@ -106,6 +124,8 @@ function getInput(tool: Tool): InputConfig {
     case 'excel-to-pdf':
       return { accept: '.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', multiple: true, hint: 'Excel .xlsx files', mode: 'files' }
     case 'html-to-pdf':
+      return { accept: '', multiple: false, hint: 'Paste your HTML', mode: 'text' }
+    case 'html-to-image':
       return { accept: '', multiple: false, hint: 'Paste your HTML', mode: 'text' }
     default:
       return { accept: 'application/pdf', multiple: tool.batch, hint: 'PDF files', mode: 'files' }
@@ -140,6 +160,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const isWordToPdf = tool.id === 'word-to-pdf'
   const isExcelToPdf = tool.id === 'excel-to-pdf'
   const isHtmlToPdf = tool.id === 'html-to-pdf'
+  const isHtmlToImage = tool.id === 'html-to-image'
   const isPdfToExcel = tool.id === 'pdf-to-excel'
   const isPageNumbers = tool.id === 'page-numbers'
   const isCropImages = tool.id === 'crop-images'
@@ -163,6 +184,10 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   const [htmlConfig, setHtmlConfig] = React.useState<HtmlToPdfConfig>({
     html: '', orientation: 'portrait', pageSize: 'a4',
     screenWidth: 'desktop', onePage: false, margin: 0,
+  })
+  const [htmlImageConfig, setHtmlImageConfig] = React.useState<HtmlToImageConfig>({
+    html: '', sourceName: '', format: 'png', quality: 0.92,
+    screenWidth: 'desktop', scale: 2, background: 'white',
   })
 
   const processing = useProcessing()
@@ -190,6 +215,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     setImagesConfig({ pages: [], orientation: 'portrait', pageSize: 'fit', margin: 0, output: 'single', selectedIds: [] })
     setPdfToImagesConfig({ mode: 'pages', format: 'png', selectedPages: [], selectedImages: [], scale: 2 })
     setHtmlConfig({ html: '', orientation: 'portrait', pageSize: 'a4', screenWidth: 'desktop', onePage: false, margin: 0 })
+    setHtmlImageConfig({ html: '', sourceName: '', format: 'png', quality: 0.92, screenWidth: 'desktop', scale: 2, background: 'white' })
   }, [tool.id])
 
   // Sync mergeOrder/wordOrder when files change
@@ -229,11 +255,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
   )
 
   const canProcess =
-    isHtmlToPdf
-      ? htmlConfig.html.trim().length > 0
-      : cfg.mode === 'files'
-        ? files.length > 0
-        : html.trim().length > 0
+    isHtmlToImage
+      ? htmlImageConfig.html.trim().length > 0
+      : isHtmlToPdf
+        ? htmlConfig.html.trim().length > 0
+        : cfg.mode === 'files'
+          ? files.length > 0
+          : html.trim().length > 0
 
   const needsPassword = tool.id === 'protect'
   const hasPassword = String(options.password ?? '').length > 0
@@ -269,15 +297,95 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
     let actualProcessor = processor
 
     // Tools that need main-thread pre-rendering before run() — show feedback.
-    const needsPrepare = isHtmlToPdf || isWordToPdf || isExcelToPdf
+    const needsPrepare = isHtmlToPdf || isHtmlToImage || isWordToPdf || isExcelToPdf
     if (needsPrepare) {
       setPreparing(true)
-      setPrepareMsg('Rendering pages…')
+      setPrepareMsg(isHtmlToImage ? 'Rendering image…' : 'Rendering pages…')
       // Yield so React paints the preparing state before the heavy work starts.
       await new Promise((r) => setTimeout(r, 0))
     }
 
-    if (isHtmlToPdf) {
+    if (isHtmlToImage) {
+      // HTML to Image: render HTML visually in a hidden iframe, capture with
+      // html2canvas, then encode straight to PNG/JPEG/WebP. The worker only
+      // packages the finished bytes (see processors['html-to-image']).
+      const htmlContent = htmlImageConfig.html.trim()
+      if (!htmlContent) {
+        toast.error('Please provide HTML content first.')
+        return
+      }
+
+      const SCREEN_W = htmlImageConfig.screenWidth === 'mobile' ? 375 : htmlImageConfig.screenWidth === 'tablet' ? 768 : 1280
+      const SCALE = htmlImageConfig.scale
+      const mime = htmlImageConfig.format === 'jpeg' ? 'image/jpeg' : htmlImageConfig.format === 'webp' ? 'image/webp' : 'image/png'
+      const transparent = htmlImageConfig.background === 'transparent' && htmlImageConfig.format !== 'jpeg'
+
+      const iframe = document.createElement('iframe')
+      iframe.style.cssText = `position:fixed;left:-9999px;top:0;width:${SCREEN_W}px;height:800px;border:none;`
+      document.body.appendChild(iframe)
+
+      try {
+        await new Promise((r) => setTimeout(r, 100))
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow!.document
+        const isFullDoc = /<html[\s>]/i.test(htmlContent)
+        iframeDoc.open()
+        if (isFullDoc) {
+          iframeDoc.write(htmlContent)
+        } else {
+          iframeDoc.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+            html, body { margin:0; padding:0; }
+            body { background:${transparent ? 'transparent' : '#ffffff'}; }
+          </style></head><body>${htmlContent}</body></html>`)
+        }
+        iframeDoc.close()
+
+        // Wait for content to render (fonts, images, layout)
+        await new Promise((r) => setTimeout(r, 1200))
+
+        await ensureHtml2Canvas()
+        const h2c = (window as any).html2canvas
+
+        // documentElement.scrollHeight is floored at the iframe viewport
+        // height, which would add dead whitespace below short snippets.
+        // When the root measures exactly one viewport tall, prefer the
+        // body's true content height instead.
+        const rootEl = iframeDoc.documentElement
+        const bodyEl = iframeDoc.body
+        const bodyH = bodyEl
+          ? Math.max(bodyEl.scrollHeight, Math.ceil(bodyEl.getBoundingClientRect().height))
+          : 0
+        const docH = rootEl.scrollHeight
+        const contentH = docH > bodyH && docH === rootEl.clientHeight
+          ? Math.max(bodyH, 1)
+          : Math.max(docH, bodyH, 1)
+        console.log('[html-to-image] Capturing iframe content:', SCREEN_W, 'x', contentH, 'at', SCALE + 'x')
+
+        const canvas = await h2c(iframeDoc.documentElement, {
+          scale: SCALE,
+          useCORS: true,
+          allowTaint: true,
+          backgroundColor: transparent ? null : '#ffffff',
+          width: SCREEN_W,
+          height: contentH,
+          windowWidth: SCREEN_W,
+        })
+
+        const blob = await new Promise<Blob | null>((res) => canvas.toBlob(res, mime, htmlImageConfig.quality))
+        if (!blob) throw new Error('Could not encode the image — try a smaller render width or scale.')
+        // Browsers silently fall back on unsupported encoders (e.g. WebP → PNG
+        // on Safari) — trust the actual blob type for extension + mime.
+        const EXT: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }
+        const ext = EXT[blob.type] || 'png'
+        const data = await blob.arrayBuffer()
+        const baseName =
+          (htmlImageConfig.sourceName || 'html-to-image').replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '-') || 'html-to-image'
+        inputs = [{ fileName: `${baseName}.${ext}`, data, size: data.byteLength }]
+        actualProcessor = 'html-to-image'
+        mode = 'per-file'
+      } finally {
+        iframe.remove()
+      }
+    } else if (isHtmlToPdf) {
       // HTML to PDF: render HTML visually in iframe, capture with html2canvas,
       // send page images to worker. Also send the raw HTML so the worker can
       // draw invisible selectable text on top of the images.
@@ -940,6 +1048,11 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
             onResultChange={setInteractiveResult}
             onRemoveFile={() => setFiles([])}
           />
+        ) : isHtmlToImage ? (
+          <HtmlToImageView
+            config={htmlImageConfig}
+            onConfigChange={setHtmlImageConfig}
+          />
         ) : isHtmlToPdf ? (
           <HtmlToPdfView
             config={htmlConfig}
@@ -972,7 +1085,7 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
         )}
 
         {/* Tool-specific options */}
-        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isPdfToExcel && (
+        {cfg.mode === 'files' && hasOptions(tool.id) && files.length > 0 && !isSplit && !isMerge && !isRotate && !isImagesToPdf && !isPdfToImages && !isWordToPdf && !isExcelToPdf && !isHtmlToPdf && !isHtmlToImage && !isPdfToExcel && (
           <div className="mt-5">
             <ToolOptions
               tool={tool}
@@ -1009,9 +1122,13 @@ export function ToolPage({ tool, onNavigate, onBack }: ToolPageProps) {
                 ? files.length === 0
                   ? 'Add files to begin.'
                   : `${files.length} file${files.length > 1 ? 's' : ''} ready.`
-                : html.trim()
-                  ? 'HTML ready.'
-                  : 'Paste HTML to begin.'}
+                : isHtmlToImage
+                  ? htmlImageConfig.html.trim()
+                    ? 'HTML ready — it will render exactly as previewed.'
+                    : 'Paste code or upload an .html file to begin.'
+                  : html.trim()
+                    ? 'HTML ready.'
+                    : 'Paste HTML to begin.'}
           </p>
           <Button
             size="lg"

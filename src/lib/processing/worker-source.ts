@@ -3066,6 +3066,32 @@ processors['resize-images'] = async function (inputs, opts, onProgress, log) {
   return out;
 };
 
+/* ---- HTML to Image (pre-rasterized on the main thread) ------------------- */
+/* The main thread renders the user's HTML in a hidden iframe and captures it
+   with html2canvas, then hands the finished image bytes here. The worker just
+   packages them as a downloadable result (correct name/mime + dimensions). */
+processors['html-to-image'] = async function (inputs, _opts, onProgress, log) {
+  var out = [];
+  for (var i = 0; i < inputs.length; i++) {
+    log('Packaging ' + inputs[i].fileName);
+    var note = '';
+    try {
+      var bmp = await createImageBitmap(new Blob([inputs[i].data]));
+      note = bmp.width + 'x' + bmp.height + ' px';
+      if (bmp.close) bmp.close();
+    } catch (e) { /* dimensions are decorative — never fail the run */ }
+    onProgress((i + 1) / inputs.length);
+    out.push({
+      name: inputs[i].fileName,
+      data: inputs[i].data,
+      mime: guessMime(inputs[i].fileName),
+      note: note,
+    });
+  }
+  onProgress(1);
+  return out;
+};
+
 self.onmessage = function (e) {
   var task = e.data && e.data.task;
   if (!task) return;
