@@ -25,6 +25,7 @@ import {
   Globe,
   Laugh,
   ScanFace,
+  Shrink,
 } from "lucide-react";
 
 export type ToolCategory =
@@ -142,6 +143,7 @@ export const tools: Tool[] = [
     accent: "orange",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "favicon-generator",
@@ -153,6 +155,7 @@ export const tools: Tool[] = [
     accent: "orange",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
   {
     id: "watermark-images",
@@ -177,6 +180,7 @@ export const tools: Tool[] = [
     accent: "orange",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   {
@@ -189,6 +193,7 @@ export const tools: Tool[] = [
     accent: "violet",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   {
@@ -201,6 +206,20 @@ export const tools: Tool[] = [
     accent: "teal",
     batch: true,
     step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
+  },
+
+  {
+    id: "compress-images",
+    name: "Compress Image",
+    description:
+      "Shrink JPG, PNG and WEBP images to a fraction of their size — pick the format and quality per file, optionally downscale huge photos. Batch ready; download each or all as ZIP.",
+    category: "image",
+    icon: Shrink,
+    accent: "orange",
+    batch: true,
+    step: 7,
+    locked: true, // DEV-ONLY: production-locked — do not modify unless explicitly asked
   },
 
   // ---------- Organize ----------

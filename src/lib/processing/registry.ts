@@ -33,6 +33,7 @@ export const toolProcessors: Partial<Record<string, ProcessorType>> = {
   'rotate-images': 'rotate-images',
   'meme-maker': 'meme-maker',
   'blur-faces': 'blur-faces',
+  'compress-images': 'compress-images',
 }
 
 export function getProcessor(toolId: string): ProcessorType {

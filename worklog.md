@@ -809,3 +809,23 @@ Work Log:
 
 Stage Summary:
 - Blur Face now supports free rotation: every blur area (face ellipse or box) can be rotated to any angle via the grip above it or the Rotation slider, resize handles work in the shape's own rotated frame, and the worker bakes the identical rotated censoring into the output (pixel-verified for both rect and ellipse paths). Shape borders are fully invisible — the blur region itself is the only on-image marker, with handles/grip appearing only for the selected shape.
+
+---
+Task ID: 15
+Agent: Super Z (main agent)
+Task: Flag all image tools as "Perfect" + add new Compress Image tool (user request).
+
+Work Log:
+- tools.ts: added `locked: true` to the 5 unflagged image tools (convert-images, favicon-generator, rotate-images, meme-maker, blur-faces) — all 8 image tools now carry the flag (crop-images, watermark-images were already flagged).
+- tool-card.tsx: the `locked` pill now renders the text "Perfect" (emerald pill, Lock icon, uppercase, title "Perfect — production-ready, do not modify unless explicitly asked") instead of the bare lock icon.
+- New tool compress-images end to end:
+  * types.ts: ProcessorType gains 'compress-images'; registry.ts maps 'compress-images' -> 'compress-images'.
+  * tools.ts: registry entry "Compress Image" (category image, icon Shrink, accent orange, batch, step 7, locked: true).
+  * compress-images-view.tsx (new, modeled on convert-images-view): global settings card (Same format for all: Keep original/JPG/JPEG/WEBP/PNG · Quality slider 10-100 default 70 · Max size select Original/3840/2560/1920/1280/800), per-file rows with thumbnail, real size, dims + live downscale preview ("1200×800 px → 800×533 px" only when the longest edge exceeds maxDim), per-file format Select, remove + add-more tiles, privacy/format explainer. Emits CompressImagesResult { formats: Record<fileName, 'keep'|'png'|'jpg'|'jpeg'|'webp'>, quality, maxDim } via onChange.
+  * worker-source.ts: processors['compress-images'] — createImageBitmap(from-image EXIF) -> 'keep' maps jpg/jpeg->jpg, webp->webp, everything else->png; optional downscale scale=maxDim/max(w,h) never upscales, high smoothing quality; JPEG flattens onto white; convertToBlob(type, quality) with mime-verify; note "WxH px · N% smaller|larger" computed from input.data.byteLength (original size, no protocol change needed since onmessage passes {fileName,data} only).
+  * tool-page.tsx wiring: import, getInput case (image/*, multiple), INTERACTIVE_TOOLS, isCompressImages flag, interactiveResult union, handleProcess branch (runOptions = formats/quality/maxDim with 0.7/0 fallbacks), render branch after ConvertImagesView.
+- E2E (agent-browser): all 8 image cards show PERFECT pill on home (others unchanged: Repair PDF, PDF to Images, PDF to Excel, Page Numbers, Watermark PDF, Sign & Annotate, Edit PDF Text, Protect/Unlock PDF correctly unflagged). Tool page renders; run 1 (defaults keep/JPG+PNG Q70): test-photo.jpg 67KB -> 32.4KB "1200x800 px · 52% smaller", checker PNG 3.9KB -> 10.6KB honest "larger" note. Run 2 (WEBP-for-all + Max size 800): photo -> 4426B WEBP, magic bytes RIFF/WEBP, decoded exactly 800x533 (94% smaller); checker -> RIFF/WEBP 640x480 (no upscale, "46% larger" — synthetic pattern resists lossy WEBP, honest). ZIP batch = PK 10035B with both files. Combobox note: page has 4 comboboxes on this view (2 global + 2 per-file rows) — Max size is index 1, not 2. Gotcha hit: `agent-browser upload @ref` with RELATIVE paths produced size-0 NotReadableError File objects — always pass absolute paths.
+- `bun run lint` clean; no page errors. Screenshots: upload/compress-home.png (Perfect pills grid), upload/compress-results.png (results panel).
+
+Stage Summary:
+- Every image tool now wears the emerald "Perfect" pill (8/8), and the badge explicitly reads "Perfect". New Compress Image tool is live at #/compress-images: batch re-encode with per-file target format (keep/JPG/WEBP/PNG), shared quality slider, optional longest-edge downscale, honest per-file size-delta notes, per-file + ZIP downloads — fully E2E-verified (magic bytes, exact dimensions, real savings) and production-locked like its siblings.
