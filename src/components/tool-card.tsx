@@ -61,11 +61,10 @@ export function ToolCard({ tool, onOpen, index = 0 }: ToolCardProps) {
           )}
           {tool.locked && (
             <span
-              title="Perfect — production-ready, do not modify unless explicitly asked"
-              className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400"
+              title="Locked — stable & production-ready, do not modify unless explicitly asked"
+              className="inline-flex items-center rounded-full bg-emerald-500/10 p-1.5 text-emerald-600 dark:text-emerald-400"
             >
               <Lock className="h-2.5 w-2.5" />
-              Perfect
             </span>
           )}
         </div>

@@ -851,3 +851,16 @@ Work Log:
 
 Stage Summary:
 - Resize Image is live at #/resize-images with the iLoveIMG feature set (By pixels / By percentage, Maintain aspect ratio, Do not enlarge if smaller) in ToolForge's design language: fit-in-box batch semantics that never distort, honest per-row output-size previews before running, original format preserved, per-file + ZIP downloads. All three resize paths E2E-verified pixel-exact; tool ships production-locked (Perfect pill) with the other 8 image tools.
+
+---
+Task ID: 17
+Agent: Super Z (main agent)
+Task: User feedback on locked-tool badge — "only a lock icon was enough, no need of this word perfect".
+
+Work Log:
+- tool-card.tsx: removed the visible "Perfect" text from the locked badge; kept the emerald lock-only pill (p-1.5 rounded-full, bg-emerald-500/10) and reworded the hover tooltip to "Locked — stable & production-ready, do not modify unless explicitly asked" (word "Perfect" fully gone from UI).
+- Grep sweep: only remaining "perfect" in src is the unrelated "pixel-perfect PDF" copy in the HTML-to-PDF tool description (intentionally untouched).
+- bun run lint clean. E2E screenshot upload/lock-only-cards.png: all locked image cards render the small green lock icon with no text.
+
+Stage Summary:
+- Locked-tool badge is now a minimal lock-only pill across all 9 locked tools; tooltip preserves the do-not-modify semantics on hover only.
